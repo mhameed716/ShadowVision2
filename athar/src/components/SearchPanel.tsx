@@ -19,12 +19,10 @@ export interface Budget {
 export function SearchPanel({
   endpointCount,
   budget,
-  canDeepSearch,
   synthetic
 }: {
   endpointCount: number;
   budget: Budget | null;
-  canDeepSearch: boolean;
   synthetic: boolean;
 }) {
   const { locale } = useLocale();
@@ -186,10 +184,9 @@ export function SearchPanel({
           <select
             value={depth}
             onChange={(e) => setDepth(Number(e.target.value))}
-            disabled={!canDeepSearch}
             className="athar-input !w-auto"
             aria-label={s.depth[locale]}
-            title={canDeepSearch ? s.depth[locale] : r.deepSearchOn[locale]}
+            title={s.depth[locale]}
           >
             <option value={0}>
               {s.depth[locale]}: {s.depthOff[locale]}

@@ -3,7 +3,6 @@ import { resolveLocale, dict, type Locale } from '@/lib/i18n';
 import { corpusStats, loadSites, CATEGORY_LABELS, type Category } from '@/lib/engine/sites';
 import { currentUser, anonKey, clientIp } from '@/lib/auth';
 import { allowanceFor, anonBudgetFor, nextReset } from '@/lib/credits';
-import { PLANS } from '@/lib/credits';
 import { SearchPanel, type Budget } from '@/components/SearchPanel';
 import Link from 'next/link';
 
@@ -24,8 +23,8 @@ export default async function HomePage() {
         anonymous: anonBudgetFor(anonKey(clientIp(head)))
       };
 
-  // Athar is free: every visitor gets deep search and every field.
-  const canDeepSearch = true;
+  // Athar is free: every visitor gets deep search and every field, so the
+  // depth selector is never gated.
   const synthetic = process.env.ATHAR_OFFLINE === '1';
 
   return (
@@ -33,7 +32,6 @@ export default async function HomePage() {
       <SearchPanel
         endpointCount={stats.total}
         budget={budget}
-        canDeepSearch={canDeepSearch}
         synthetic={synthetic}
       />
 
@@ -60,44 +58,37 @@ export default async function HomePage() {
 
       <section className="athar-shell border-t border-ink-800 py-12">
         <h2 className="text-lg font-semibold tracking-tight">
-          {dict.pricing.title[locale]}
+          {locale === 'ar' ? 'كل شيء مجاني.' : 'Everything is free.'}
         </h2>
-        <p className="mt-2 max-w-2xl text-sm text-slate-400">{dict.pricing.subtitle[locale]}</p>
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {(['free', 'starter', 'pro', 'enterprise'] as const).map((id) => {
-            const plan = PLANS[id];
-            return (
-              <div key={id} className="athar-card flex flex-col">
-                <p className="text-xs uppercase tracking-wide text-slate-500">{id}</p>
-                <p className="mt-1 text-2xl font-bold">
-                  {plan.priceMonthlyUsd === null
-                    ? locale === 'ar'
-                      ? 'حسب العقد'
-                      : 'Custom'
-                    : `$${plan.priceMonthlyUsd}`}
-                  {plan.priceMonthlyUsd !== null && (
-                    <span className="ms-1 text-xs font-normal text-slate-500">/mo</span>
-                  )}
-                </p>
-                <p className="mt-1 text-xs text-slate-400">
-                  {plan.weeklyUnits === null
-                    ? dict.pricing.unlimited[locale]
-                    : `${plan.weeklyUnits} ${dict.pricing.perWeek[locale]}`}
-                </p>
-                <Link
-                  href={id === 'enterprise' ? '/pricing' : '/pricing'}
-                  className="athar-btn-ghost mt-4 !py-1.5 !text-xs"
-                >
-                  {id === 'free' ? dict.pricing.startFree[locale] : dict.pricing.choose[locale]}
-                </Link>
-              </div>
-            );
-          })}
-        </div>
-        <p className="mt-4 text-xs text-slate-600">
-          {dict.pricing.oneSearch[locale]} · {dict.pricing.reveal[locale]} ·{' '}
-          {dict.pricing.deep[locale]}
+        <p className="mt-2 max-w-2xl text-sm text-slate-400">
+          {locale === 'ar'
+            ? 'لا خطط ولا وحدات ولا حدود مدفوعة. البحث العميق والتصدير الكامل وكل نقطة نهاية متاحة للجميع، حتى بدون حساب.'
+            : 'No plans, no units, no paid limits. Deep search, full exports and every endpoint are available to everyone — no account required.'}
         </p>
+        <div className="mt-5 grid gap-3 sm:grid-cols-3">
+          {[
+            {
+              en: ['Deep search', 'Recursion depths 1–4 for every visitor, including anonymous ones.'],
+              ar: ['البحث العميق', 'أعماق 1–4 لكل زائر، بما في ذلك المجهول.']
+            },
+            {
+              en: ['Full exports', 'JSON, CSV and PDF evidence exports with no watermark or truncation.'],
+              ar: ['تصدير كامل', 'تصدير الأدلة بصيغ JSON وCSV وPDF بلا قيود.']
+            },
+            {
+              en: ['Whole corpus', `All ${stats.total} endpoints on every search, not a gated subset.`],
+              ar: ['المصادر كلها', `كل الـ${stats.total} مصدرًا في كل بحث، لا مجموعة مقصورة.`]
+            }
+          ].map((feature, index) => (
+            <div key={index} className="athar-card">
+              <p className="text-sm font-semibold text-slate-100">{feature[locale][0]}</p>
+              <p className="mt-1 text-xs text-slate-400">{feature[locale][1]}</p>
+            </div>
+          ))}
+        </div>
+        <Link href="/pricing" className="athar-btn-ghost mt-5 !py-1.5 !text-xs">
+          {locale === 'ar' ? 'الحدود الصريحة' : 'The honest limits'}
+        </Link>
       </section>
 
       <section className="athar-shell border-t border-ink-800 py-12">
