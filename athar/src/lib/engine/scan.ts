@@ -8,6 +8,30 @@ import {
 } from './checker';
 import { scoreHit, rankHits, type RankedHit } from './rank';
 import { extractLeads, rankLeads } from './extract';
+import { providersForSite, standaloneProviders } from './providers';
+import type { Profile } from './checker';
+
+/**
+ * Overlay structured provider data on top of scraped HTML.
+ *
+ * The provider wins for every field it actually returned, because a platform's
+ * own JSON endpoint is more reliable than a regex over its markup. HTML values
+ * survive wherever the provider had nothing.
+ */
+export function mergeProfiles(scraped: Profile, structured: Profile): Profile {
+  const links = [...new Set([...(structured.links ?? []), ...(scraped.links ?? [])])].slice(0, 12);
+  return {
+    ...scraped,
+    ...structured,
+    displayName: structured.displayName || scraped.displayName,
+    bio: structured.bio || scraped.bio,
+    avatar: structured.avatar || scraped.avatar,
+    location: structured.location || scraped.location,
+    website: structured.website || scraped.website,
+    links,
+    counts: { ...scraped.counts, ...structured.counts }
+  };
+}
 
 export interface ScanParams {
   query: string;
@@ -33,6 +57,10 @@ export interface ScanSummary {
   found: number;
   skipped: number;
   failed: number;
+  /** Probes that answered 200 but were dropped as soft-404 or anti-bot pages. */
+  filtered: number;
+  /** Probes that answered cleanly with "no such profile" — the normal case. */
+  notFound: number;
   elapsedMs: number;
   depthReached: number;
   byCategory: Record<string, number>;
@@ -119,11 +147,52 @@ export async function* runScan(params: ScanParams): AsyncGenerator<ScanEvent> {
   let checked = 0;
   let skipped = 0;
   let failed = 0;
+  let filtered = 0;
+  let notFound = 0;
   let depthReached = 0;
   let lastProgress = 0;
+  // Probes actually scheduled. Deep search fans out per seed, so the total
+  // grows as levels run — reporting a fixed corpus size here would let the
+  // progress bar pass 100%.
+  let scheduled = 0;
 
   const seeds: string[] = [handle];
   const seenSeeds = new Set<string>([handle.toLowerCase()]);
+
+  // Standalone providers are platforms with a keyless JSON endpoint but no
+  // corpus entry, so they are queried directly. Each one is a real platform
+  // hit, not an HTML guess.
+  const standalones = standaloneProviders().filter((p) => {
+    try {
+      return p.accepts(handle);
+    } catch {
+      return false;
+    }
+  });
+  for (const provider of standalones) {
+    try {
+      const result = await provider.fetch(handle, params.fetchImpl ?? fetch);
+      if (!result) continue;
+      const profile = result.profile;
+      const tier = tierOf(provider.id);
+      const hit: RankedHit = {
+        siteName: provider.label,
+        siteUrlMain: new URL(result.url).origin + '/',
+        resultUrl: result.url,
+        category: categoryOf(provider.label, result.url),
+        tier,
+        // A structured answer from the platform itself outranks a scraped page.
+        score: scoreHit(tier, profile, { verified: profile.verified === true }) + 20,
+        profile: { ...profile, source: result.source, raw: result.raw },
+        via: null
+      };
+      hits.push(hit);
+      checked += 1;
+      yield { type: 'hit', hit };
+    } catch {
+      /* one unreachable provider never blocks the rest */
+    }
+  }
 
   for (let level = 0; level <= maxDepth; level += 1) {
     const currentSeeds = level === 0 ? seeds : seeds.slice();
@@ -136,6 +205,7 @@ export async function* runScan(params: ScanParams): AsyncGenerator<ScanEvent> {
     const levelProfiles: ReturnType<typeof extractProfile>[] = [];
 
     for (const seed of currentSeeds) {
+      scheduled += sites.length;
       const probe = async (site: SiteDef): Promise<ProbeResult> => {
         const outcome = await checkSite(site, seed, {
           timeoutMs,
@@ -152,14 +222,31 @@ export async function* runScan(params: ScanParams): AsyncGenerator<ScanEvent> {
         } else if (result.outcome.kind === 'error') {
           failed += 1;
         } else if (result.outcome.kind === 'found') {
-          const profile = result.profile ?? { links: [], counts: {} };
+          let profile = result.profile ?? { links: [], counts: {} };
           if (!looksLikePlaceholder(result.site, profile, seed)) {
+            // Structured enrichment: where the platform publishes a keyless JSON
+            // endpoint, its data replaces the scraped HTML, because it carries
+            // identifiers, join dates and counts the page never exposes.
+            let canonicalUrl: string | null = null;
+            const provider = providersForSite(result.site.name)[0];
+            if (provider && provider.accepts(seed)) {
+              try {
+                const enriched = await provider.fetch(seed, params.fetchImpl ?? fetch);
+                if (enriched) {
+                  profile = mergeProfiles(profile, enriched.profile);
+                  canonicalUrl = enriched.url;
+                }
+              } catch {
+                /* a failed provider must never discard the HTML hit */
+              }
+            }
+
             levelProfiles.push(profile);
             const tier = tierOf(result.site.name);
             const hit: RankedHit = {
               siteName: result.site.name,
               siteUrlMain: result.site.urlMain,
-              resultUrl: result.outcome.finalUrl,
+              resultUrl: canonicalUrl ?? result.outcome.finalUrl,
               category: categoryOf(result.site.name, result.site.urlMain),
               tier,
               score: scoreHit(tier, profile),
@@ -172,16 +259,26 @@ export async function* runScan(params: ScanParams): AsyncGenerator<ScanEvent> {
               (occurrences.get(seed.toLowerCase()) ?? 0) + 1
             );
             yield { type: 'hit', hit };
+          } else {
+            // A 200 that is really a soft-404 or an anti-bot interstitial. It
+            // consumed a probe, so it must be accounted for or `checked`
+            // silently drifts past found + failed + skipped.
+            filtered += 1;
           }
+        } else {
+          // 'not_found': a clean 404-style answer, which is the expected
+          // outcome for almost every site. It still consumed a probe, so it
+          // must be counted or the summary under-reports by hundreds.
+          notFound += 1;
         }
 
         const now = Date.now();
-        if (now - lastProgress > 250 || checked === sites.length) {
+        if (now - lastProgress > 250 || checked >= scheduled) {
           lastProgress = now;
           yield {
             type: 'progress',
             checked,
-            total: sites.length,
+            total: scheduled,
             found: hits.length,
             elapsedMs: now - started
           };
@@ -210,10 +307,11 @@ export async function* runScan(params: ScanParams): AsyncGenerator<ScanEvent> {
     handle
   );
 
-  // `checked` accumulates across every depth level, so `total` must too —
-  // otherwise a deep search reports checked=924 against total=462.
-  const levelsRun = depthReached + 1;
-  const totalChecks = sites.length * levelsRun;
+  // `checked` counts one probe per seed per site, so `total` must be the number
+  // of probes actually scheduled, plus the standalone provider calls. Deriving
+  // it from depth levels instead would under-report whenever a level fans out
+  // across several seeds, and the progress bar would pass 100%.
+  const totalChecks = scheduled + standalones.length;
 
   yield {
     type: 'done',
@@ -224,6 +322,8 @@ export async function* runScan(params: ScanParams): AsyncGenerator<ScanEvent> {
       found: ranked.length,
       skipped,
       failed,
+      filtered,
+      notFound,
       elapsedMs: Date.now() - started,
       depthReached,
       byCategory,

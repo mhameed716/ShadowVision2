@@ -1,9 +1,12 @@
 import { db, weekKey, dayKey, type Plan } from './db';
 
 /**
- * Mirrors the published pricing model: a search costs 1 unit, a breach reveal 5,
- * and a deep search costs 3/6/12/24 units by depth 1..4. Allowances reset
- * Monday 00:00 UTC and unused units do not roll over.
+ * Athar is free. Every capability is available to every visitor.
+ *
+ * The unit ledger is retained because it is still the right way to *account*
+ * for work — an operator who later needs quotas or per-tenant billing gets them
+ * by changing numbers here, not by rewiring the scan path. `null` means
+ * unlimited, which is what every tier now sets.
  */
 export interface PlanDef {
   id: Plan;
@@ -18,30 +21,30 @@ export interface PlanDef {
 export const PLANS: Record<Plan, PlanDef> = {
   free: {
     id: 'free',
-    weeklyUnits: 20,
+    weeklyUnits: null,
     priceMonthlyUsd: 0,
-    breachRecords: 'counts',
-    deepSearch: false,
-    aiSummary: false,
-    restApi: false
-  },
-  starter: {
-    id: 'starter',
-    weeklyUnits: 50,
-    priceMonthlyUsd: 20,
-    breachRecords: 'partial',
-    deepSearch: false,
-    aiSummary: true,
-    restApi: false
-  },
-  pro: {
-    id: 'pro',
-    weeklyUnits: 500,
-    priceMonthlyUsd: 49.99,
     breachRecords: 'full',
     deepSearch: true,
     aiSummary: true,
-    restApi: false
+    restApi: true
+  },
+  starter: {
+    id: 'starter',
+    weeklyUnits: null,
+    priceMonthlyUsd: 0,
+    breachRecords: 'full',
+    deepSearch: true,
+    aiSummary: true,
+    restApi: true
+  },
+  pro: {
+    id: 'pro',
+    weeklyUnits: null,
+    priceMonthlyUsd: 0,
+    breachRecords: 'full',
+    deepSearch: true,
+    aiSummary: true,
+    restApi: true
   },
   enterprise: {
     id: 'enterprise',
@@ -54,7 +57,13 @@ export const PLANS: Record<Plan, PlanDef> = {
   }
 };
 
-export const ANON_DAILY_SCANS = 5;
+/**
+ * Athar is free, so this is no longer a paywall. It stays as a coarse abuse
+ * brake against a single client hammering hundreds of upstream sites in a loop,
+ * which would otherwise get the operator's IP blocked everywhere. Set to 0 or
+ * below to disable it entirely.
+ */
+export const ANON_DAILY_SCANS = Number(process.env.ATHAR_ANON_DAILY_SCANS ?? 200);
 export const DEPTH_COST = [1, 3, 6, 12, 24]; // index = depth 0..4
 export const BREACH_REVEAL_COST = 5;
 

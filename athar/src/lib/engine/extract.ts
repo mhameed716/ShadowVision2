@@ -57,6 +57,49 @@ function addHandle(bucket: Set<string>, candidate: string): void {
   bucket.add(handle);
 }
 
+/**
+ * Cross-platform handles published as structured data.
+ *
+ * These are far stronger leads than anything regexed out of a bio: the platform
+ * itself asserts the link. GitHub states the linked Twitter handle directly, and
+ * Keybase publishes cryptographic proofs pointing at profiles on other services.
+ */
+function structuredHandles(profile: Profile): string[] {
+  const out: string[] = [];
+  const raw = profile.raw;
+  if (!raw) return out;
+
+  // GitHub publishes the linked X/Twitter handle as a first-class field.
+  if (typeof raw.twitter_username === 'string' && raw.twitter_username) {
+    out.push(raw.twitter_username);
+  }
+
+  // Keybase proofs carry an explicit service name plus the profile URL.
+  const summaries = (raw.proofs_summary as { all?: unknown } | undefined)?.all;
+  if (Array.isArray(summaries)) {
+    for (const proof of summaries as Array<Record<string, unknown>>) {
+      const url = typeof proof.profile_url === 'string' ? proof.profile_url : '';
+      const name = typeof proof.name === 'string' ? proof.name : '';
+      if (url) out.push(url);
+      // Keybase states the remote username directly for some services.
+      if (name && /^(twitter|github|reddit|hackernews|news)$/i.test(name)) {
+        const remote = proof.profile_url;
+        if (typeof remote === 'string') out.push(remote);
+      }
+    }
+  }
+
+  // Mastodon publishes verified identity links as HTML anchors in fields.
+  const fields = raw.fields;
+  if (Array.isArray(fields)) {
+    for (const field of fields as Array<{ value?: string }>) {
+      if (typeof field.value === 'string') out.push(field.value);
+    }
+  }
+
+  return out;
+}
+
 export function extractLeads(
   profiles: Profile[],
   seedHandle: string
@@ -73,10 +116,29 @@ export function extractLeads(
     }
     const text = raw.replace(EMAIL_IN_BIO, ' ');
     for (const match of text.matchAll(HANDLE_TOKEN)) addHandle(handles, match[1]);
+
+    // Structured cross-platform data first — the platform asserts these links.
+    for (const value of structuredHandles(profile)) {
+      for (const { pattern, group } of PROFILE_URL_PATTERNS) {
+        pattern.lastIndex = 0;
+        for (const match of value.matchAll(pattern)) addHandle(handles, match[group]);
+      }
+      // A bare handle with no URL shape is still a usable lead.
+      if (!/https?:\/\//.test(value)) addHandle(handles, value);
+    }
+
     for (const link of profile.links ?? []) {
       for (const { pattern, group } of PROFILE_URL_PATTERNS) {
         pattern.lastIndex = 0;
         for (const match of link.matchAll(pattern)) addHandle(handles, match[group]);
+      }
+    }
+
+    // A published website is often where the next identifier lives.
+    if (profile.website) {
+      for (const { pattern, group } of PROFILE_URL_PATTERNS) {
+        pattern.lastIndex = 0;
+        for (const match of profile.website.matchAll(pattern)) addHandle(handles, match[group]);
       }
     }
   }

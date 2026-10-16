@@ -60,6 +60,8 @@ export async function GET(
     found: row.found_count,
     skipped: 0,
     failed: 0,
+    filtered: 0,
+    notFound: 0,
     elapsedMs: 0,
     depthReached: row.depth,
     byCategory,

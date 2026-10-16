@@ -24,7 +24,8 @@ export default async function HomePage() {
         anonymous: anonBudgetFor(anonKey(clientIp(head)))
       };
 
-  const canDeepSearch = Boolean(user && PLANS[user.plan].deepSearch);
+  // Athar is free: every visitor gets deep search and every field.
+  const canDeepSearch = true;
   const synthetic = process.env.ATHAR_OFFLINE === '1';
 
   return (

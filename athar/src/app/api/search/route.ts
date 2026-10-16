@@ -2,10 +2,8 @@ import { NextRequest } from 'next/server';
 import { db } from '@/lib/db';
 import { currentUser, anonKey, clientIp } from '@/lib/auth';
 import {
-  PLANS,
   allowanceFor,
   anonBudgetFor,
-  authorizeDepth,
   consumeAnonScan,
   consumeUnits,
   costOf
@@ -44,15 +42,9 @@ async function decideBudget(
   const units = costOf(depth);
   const user = await currentUser();
 
+  // Athar is free. Deep search, every field and full records are available to
+  // everyone, signed in or not, so there is no entitlement gate here.
   if (user) {
-    if (!authorizeDepth(user.plan, depth)) {
-      return {
-        ok: false,
-        status: 403,
-        code: 'needs_upgrade',
-        message: `Deep search requires Pro or Enterprise. Current plan: ${user.plan}.`
-      };
-    }
     const allowance = allowanceFor(user.id, user.plan);
     if (!allowance.unlimited && (allowance.remaining ?? 0) < units) {
       return {
@@ -65,16 +57,8 @@ async function decideBudget(
     return { ok: true, userId: user.id, anon: null, units };
   }
 
-  // Deep search is a paid capability; anonymous visitors get a masked preview.
-  if (depth > 0) {
-    return {
-      ok: false,
-      status: 401,
-      code: 'needs_account',
-      message: 'Deep search requires an account on Pro or Enterprise.'
-    };
-  }
-
+  // The only remaining brake is a coarse anti-abuse limit, so one client cannot
+  // hammer hundreds of upstream sites in a loop and get the host IP blocked.
   const key = anonKey(clientIp(request.headers));
   const budget = anonBudgetFor(key);
   if (budget.remaining < 1) {
@@ -82,7 +66,7 @@ async function decideBudget(
       ok: false,
       status: 429,
       code: 'rate_limited',
-      message: 'Daily anonymous limit reached. Create a free account to keep searching.'
+      message: 'Daily scan limit reached. Create a free account for unlimited searching.'
     };
   }
   return { ok: true, userId: null, anon: key, units: 0 };
@@ -155,6 +139,8 @@ export async function GET(request: NextRequest) {
               found: result.hits.length,
               skipped: 0,
               failed: result.failed.length,
+              filtered: 0,
+              notFound: 0,
               elapsedMs: 0,
               depthReached: 0,
               byCategory: {},

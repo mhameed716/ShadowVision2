@@ -309,6 +309,94 @@ test('runScan streams progress and hits end to end over the corpus', async () =>
   );
 });
 
+test('progress never exceeds its own total, at any depth', async () => {
+  // Regression guard: deep search fans out per seed, so a total derived from
+  // the corpus size or the depth count lets `checked` pass `total`.
+  for (const depth of [0, 2, 4]) {
+    let maxChecked = 0;
+    let reportedTotal = 0;
+    let summaryChecked = 0;
+    let summaryTotal = 0;
+
+    for await (const event of runScan({
+      query: 'ada',
+      depth,
+      concurrency: 24,
+      fetchImpl: offlineFetch
+    })) {
+      if (event.type === 'progress') {
+        maxChecked = Math.max(maxChecked, event.checked);
+        reportedTotal = event.total;
+        assert.ok(
+          event.checked <= event.total,
+          `depth ${depth}: progress reported checked=${event.checked} > total=${event.total}`
+        );
+      }
+      if (event.type === 'done') {
+        summaryChecked = event.summary.checked;
+        summaryTotal = event.summary.total;
+      }
+    }
+
+    assert.ok(summaryTotal > 0, `depth ${depth} reported a zero total`);
+    assert.ok(
+      summaryChecked <= summaryTotal,
+      `depth ${depth}: summary checked=${summaryChecked} exceeds total=${summaryTotal}`
+    );
+    assert.ok(maxChecked <= reportedTotal + 1, 'progress overshot its final total');
+  }
+});
+
+test('anti-bot challenge pages are not reported as profiles', async () => {
+  // Regression guard: PyPI served a "Client Challenge" interstitial with a 200
+  // and it was scored as a real hit for `torvalds`.
+  const challenge = async (): Promise<Response> =>
+    new Response(
+      '<html><head><title>Client Challenge</title></head><body><p>Checking your browser</p></body></html>',
+      { status: 200, headers: { 'content-type': 'text/html' } }
+    );
+
+  const outcome = await checkSite(
+    { name: 'PyPI', urlMain: 'https://pypi.org/', errorType: 'status_code', url: 'https://pypi.org/user/{}/' },
+    'torvalds',
+    { fetchImpl: challenge }
+  );
+  assert.equal(outcome.kind, 'found', 'the probe itself still succeeds — filtering happens downstream');
+  const profile = extractProfile((outcome as { body: string }).body);
+  assert.ok(
+    looksLikePlaceholder({ name: 'PyPI', urlMain: 'https://pypi.org/', url: 'https://pypi.org/user/{}/', errorType: 'status_code' }, profile, 'torvalds'),
+    'a CDN challenge page must be filtered out, not shown as a match'
+  );
+
+  // A real profile must survive the same filter.
+  const real = extractProfile(
+    '<html><head><title>torvalds (Linus Torvalds)</title></head><body>Kernel developer</body></html>'
+  );
+  assert.ok(
+    !looksLikePlaceholder({ name: 'GitHub', urlMain: 'https://github.com/', url: 'https://github.com/{}', errorType: 'status_code' }, real, 'torvalds'),
+    'a genuine profile must not be filtered'
+  );
+});
+
+test('every probe is accounted for exactly once', async () => {
+  // Regression guard: a 200 rejected as a placeholder used to increment
+  // `checked` without incrementing any bucket, so the counters drifted apart.
+  for await (const event of runScan({
+    query: 'ada',
+    depth: 0,
+    concurrency: 24,
+    fetchImpl: offlineFetch
+  })) {
+    if (event.type !== 'done') continue;
+    const s = event.summary;
+    assert.equal(
+      s.found + s.notFound + s.failed + s.skipped + s.filtered,
+      s.checked,
+      `found(${s.found}) + notFound(${s.notFound}) + failed(${s.failed}) + skipped(${s.skipped}) + filtered(${s.filtered}) !== checked(${s.checked})`
+    );
+  }
+});
+
 test('runScan rejects an empty query without touching the network', async () => {
   const events = [];
   for await (const event of runScan({ query: '   ', fetchImpl: offlineFetch })) {
@@ -332,7 +420,7 @@ test('CSV, JSON and PDF exports are all produced from the same hits', () => {
     }
   ];
   const summary: ScanSummary = {
-    handle: 'ada', checked: 481, total: 481, found: 1, skipped: 0, failed: 0,
+    handle: 'ada', checked: 481, total: 481, found: 1, skipped: 0, failed: 0, filtered: 0, notFound: 0,
     elapsedMs: 1200, depthReached: 0, byCategory: { developer: 1 },
     leads: { handles: ['northwindnow'], emails: ['ada@example.org'] }
   };
@@ -385,16 +473,19 @@ test('unit costs match the published schedule', () => {
   assert.equal(BREACH_REVEAL_COST, 5);
 });
 
-test('deep search is an entitlement, not just a price', async () => {
+test('deep search is available to everyone, signed in or not', async () => {
   const { authorizeDepth } = await import('../src/lib/credits.ts');
-  assert.equal(authorizeDepth('free', 0), true, 'free may always run a plain search');
-  assert.equal(authorizeDepth('free', 1), false, 'free must not run deep search');
-  assert.equal(authorizeDepth('free', 4), false);
-  assert.equal(authorizeDepth('starter', 2), false, 'starter has no deep search either');
-  assert.equal(authorizeDepth('pro', 1), true);
-  assert.equal(authorizeDepth('pro', 4), true);
-  assert.equal(authorizeDepth('enterprise', 4), true);
-  // Entitlement and plan table must agree, so the two cannot drift apart.
+  // Athar is free: no tier gates the depth selector.
+  for (const plan of Object.keys(PLANS) as Array<keyof typeof PLANS>) {
+    for (const depth of [0, 1, 2, 3, 4]) {
+      assert.equal(
+        authorizeDepth(plan, depth),
+        true,
+        `${plan} must allow depth ${depth}`
+      );
+    }
+  }
+  // And the plan table must agree, so the two cannot drift apart.
   for (const plan of Object.keys(PLANS) as Array<keyof typeof PLANS>) {
     assert.equal(
       authorizeDepth(plan, 2),
@@ -404,47 +495,47 @@ test('deep search is an entitlement, not just a price', async () => {
   }
 });
 
-test('grants sit on top of the plan limit and usage never goes negative', () => {
+test('every plan is free and unlimited', () => {
+  for (const plan of Object.keys(PLANS) as Array<keyof typeof PLANS>) {
+    const def = PLANS[plan];
+    assert.equal(def.weeklyUnits, null, `${plan} must be unlimited`);
+    assert.equal(def.deepSearch, true, `${plan} must allow deep search`);
+    assert.equal(def.breachRecords, 'full', `${plan} must expose full records`);
+    assert.ok(
+      def.priceMonthlyUsd === null || def.priceMonthlyUsd === 0,
+      `${plan} must not cost anything`
+    );
+  }
+});
+
+test('usage accounting stays sound even with unlimited allowances', () => {
   const user = createUser(`ledger-${Date.now()}@example.org`, 'correcthorsebattery');
 
-  // A fresh Pro account's whole entitlement is the plan limit itself.
+  // An unlimited plan reports no ceiling but still counts what was spent.
   const fresh = allowanceFor(user.id, 'pro');
-  assert.equal(fresh.weeklyLimit, 500);
+  assert.equal(fresh.unlimited, true);
+  assert.equal(fresh.weeklyLimit, null);
+  assert.equal(fresh.remaining, null);
   assert.equal(fresh.used, 0);
-  assert.equal(fresh.remaining, 500);
   assert.equal(fresh.granted, 0);
 
-  // Spending decrements, and usage stays a pure consumption counter.
   consumeUnits(user.id, costOf(2));
   const afterSearch = allowanceFor(user.id, 'pro');
-  assert.equal(afterSearch.used, 6);
-  assert.equal(afterSearch.remaining, 494);
+  assert.equal(afterSearch.used, 6, 'consumption is still tracked');
+  assert.equal(afterSearch.remaining, null, 'unlimited means no ceiling to report');
 
-  // A grant adds to the limit — it must not push usage below zero, which is
-  // what would let `remaining` exceed the published plan ceiling.
+  // A grant is additive and must never drive usage below zero.
   grantUnits(user.id, 25, 'test_topup', 'ref-1');
   const afterGrant = allowanceFor(user.id, 'pro');
   assert.equal(afterGrant.granted, 25);
   assert.equal(afterGrant.used, 6, 'usage must not be touched by a grant');
-  assert.equal(afterGrant.weeklyLimit, 525);
-  assert.equal(afterGrant.remaining, 519);
   assert.ok(afterGrant.used >= 0, 'usage must never be negative');
   assert.equal(grantedUnits(user.id), 25);
-
-  // A plan upgrade alone is the entitlement; it must not double the limit.
-  const starter = allowanceFor(user.id, 'starter');
-  assert.equal(starter.weeklyLimit, 50 + 25, 'starter limit plus the grant');
-  assert.equal(starter.remaining, 50 + 25 - 6);
 
   // Grants must be positive whole units.
   assert.throws(() => grantUnits(user.id, 0, 'bad'), /positive whole number/);
   assert.throws(() => grantUnits(user.id, -10, 'bad'), /positive whole number/);
   assert.throws(() => grantUnits(user.id, 1.5, 'bad'), /positive whole number/);
-
-  // Enterprise stays unlimited regardless of grants.
-  const enterprise = allowanceFor(user.id, 'enterprise');
-  assert.equal(enterprise.unlimited, true);
-  assert.equal(enterprise.remaining, null);
 });
 
 test('password hashing round-trips and rejects wrong passwords', () => {
@@ -457,15 +548,18 @@ test('password hashing round-trips and rejects wrong passwords', () => {
   assert.notEqual(hash, hashPassword('correcthorsebattery'));
 });
 
-test('plan entitlements gate deep search and breach detail', () => {
-  assert.equal(PLANS.free.deepSearch, false);
-  assert.equal(PLANS.pro.deepSearch, true);
-  assert.equal(PLANS.free.breachRecords, 'counts');
-  assert.equal(PLANS.starter.breachRecords, 'partial');
-  assert.equal(PLANS.pro.breachRecords, 'full');
-  assert.equal(PLANS.free.weeklyUnits, 20);
-  assert.equal(PLANS.starter.weeklyUnits, 50);
-  assert.equal(PLANS.pro.weeklyUnits, 500);
-  assert.equal(PLANS.enterprise.weeklyUnits, null);
-  assert.equal(PLANS.enterprise.restApi, true);
+test('no capability is withheld from any plan', () => {
+  // This is the regression guard for the free model: if someone reintroduces a
+  // paywall by editing one tier, this fails.
+  for (const plan of Object.keys(PLANS) as Array<keyof typeof PLANS>) {
+    const def = PLANS[plan];
+    assert.equal(def.deepSearch, true, `${plan} withholds deep search`);
+    assert.equal(def.breachRecords, 'full', `${plan} withholds breach detail`);
+    assert.equal(def.aiSummary, true, `${plan} withholds AI summaries`);
+    assert.equal(def.restApi, true, `${plan} withholds the API`);
+    assert.equal(def.weeklyUnits, null, `${plan} caps weekly units`);
+  }
+  // The unit price schedule is retained for accounting, not as a paywall.
+  assert.deepEqual(DEPTH_COST, [1, 3, 6, 12, 24]);
+  assert.equal(BREACH_REVEAL_COST, 5);
 });

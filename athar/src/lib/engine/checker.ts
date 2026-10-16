@@ -37,8 +37,22 @@ export interface Profile {
   avatar?: string;
   location?: string;
   title?: string;
+  /** Personal or project website, distinct from links found in the bio. */
+  website?: string;
+  /** Organisation or employer where a source publishes it. */
+  company?: string;
+  /** Account creation date, ISO yyyy-mm-dd where the source gives one. */
+  joinedAt?: string;
+  /** Platform-native numeric or opaque identifier. */
+  userId?: string;
+  /** Verification / proof state where the source exposes it. */
+  verified?: boolean;
   links: string[];
   counts: Record<string, number>;
+  /** Which source produced this profile — the platform or the API provider. */
+  source?: string;
+  /** Raw provider payload, retained for evidence and export. */
+  raw?: Record<string, unknown>;
 }
 
 const UA =
@@ -91,7 +105,7 @@ export function evaluate(
 }
 
 export interface FetchLike {
-  (url: string, init: RequestInit): Promise<Response>;
+  (url: string, init?: RequestInit): Promise<Response>;
 }
 
 export interface CheckOptions {
@@ -192,6 +206,124 @@ function toNumber(value: string): number {
 }
 
 /** Pull the publicly advertised profile fields out of a hit's HTML. */
+/** Profile fields JSON-LD can fill with a plain string. */
+type ProfileStringField =
+  | 'displayName'
+  | 'bio'
+  | 'avatar'
+  | 'location'
+  | 'company'
+  | 'website'
+  | 'joinedAt'
+  | 'userId';
+
+/** Fields JSON-LD Person/ProfilePage objects commonly carry. */
+const JSONLD_TEXT_FIELDS: Array<[ProfileStringField, string[]]> = [
+  ['displayName', ['name', 'alternateName']],
+  ['bio', ['description']],
+  ['avatar', ['image']],
+  ['location', ['homeLocation', 'address', 'workLocation']],
+  ['company', ['worksFor', 'affiliation', 'organization']],
+  ['website', ['url', 'sameAs']]
+];
+
+/** Pull a scalar or a nested name/url out of a JSON-LD value. */
+function jsonldScalar(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (Array.isArray(value) && value.length > 0) return jsonldScalar(value[0]);
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    for (const key of ['name', 'url', 'value', '@id', 'text']) {
+      const nested = jsonldScalar(obj[key]);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Parse embedded JSON-LD. Many platforms publish a schema.org Person or
+ * ProfilePage block that carries identifiers, join dates, audience counts and
+ * cross-platform links that never appear in the og: tags.
+ */
+export function extractJsonLd(html: string): Partial<Profile> {
+  const out: Partial<Profile> = {};
+  const blocks = html.matchAll(
+    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+  );
+  for (const block of blocks) {
+    let data: unknown;
+    try {
+      data = JSON.parse(block[1].trim());
+    } catch {
+      continue; // a malformed block must not discard the rest of the page
+    }
+    const nodes: Record<string, unknown>[] = [];
+    const walk = (node: unknown) => {
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+      } else if (node && typeof node === 'object') {
+        const obj = node as Record<string, unknown>;
+        const type = String(obj['@type'] ?? '');
+        if (/person|profilepage|organization|user/i.test(type)) nodes.push(obj);
+        if (obj['@graph']) walk(obj['@graph']);
+      }
+    };
+    walk(data);
+
+    for (const node of nodes) {
+      for (const [field, keys] of JSONLD_TEXT_FIELDS) {
+        if (out[field]) continue;
+        for (const key of keys) {
+          if (node[key] === undefined) continue;
+          const value = jsonldScalar(node[key]);
+          if (!value) continue;
+          // `sameAs`/`url` are link lists, not a display website.
+          if (field === 'website' && key === 'sameAs') {
+            out.links = [...(out.links ?? []), value];
+          } else {
+            out[field] = value;
+          }
+          break;
+        }
+      }
+      if (!out.joinedAt) {
+        const created = jsonldScalar(node['dateCreated'] ?? node['startDate']);
+        if (created) out.joinedAt = created.slice(0, 10);
+      }
+      if (!out.userId) {
+        const id = jsonldScalar(node['identifier'] ?? node['@id']);
+        if (id && !/^https?:/.test(id)) out.userId = id;
+      }
+      const counts: Record<string, number> = {};
+      const interactions = node['interactionStatistic'];
+      if (Array.isArray(interactions)) {
+        for (const stat of interactions) {
+          const name = jsonldScalar(stat?.interactionType ?? stat?.name)?.toLowerCase() ?? '';
+          const raw = stat?.userInteractionCount;
+          const value = typeof raw === 'number' ? raw : toNumber(String(raw ?? ''));
+          if (name && Number.isFinite(value)) {
+            if (/follow/i.test(name)) counts.followers = value;
+            else if (/like/i.test(name)) counts.likes = value;
+            else if (/comment/i.test(name)) counts.comments = value;
+            else counts[name] = value;
+          }
+        }
+      }
+      for (const key of ['followersCount', 'followsCount', 'postsCount']) {
+        const value = node[key];
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          counts[key.replace('Count', '').toLowerCase()] = value;
+        }
+      }
+      if (Object.keys(counts).length > 0) {
+        out.counts = { ...(out.counts ?? {}), ...counts };
+      }
+    }
+  }
+  return out;
+}
+
 export function extractProfile(html: string): Profile {
   const profile: Profile = { links: [], counts: {} };
   for (const [field, pattern] of META_TAGS) {
@@ -221,6 +353,23 @@ export function extractProfile(html: string): Profile {
     const value = toNumber(match[1]);
     if (Number.isFinite(value)) profile.counts[key] = value;
   }
+
+  // Structured data fills whatever the og: tags did not carry. og: wins for
+  // displayName because it is the platform's own headline.
+  const jsonld = extractJsonLd(html);
+  profile.displayName = profile.displayName ?? jsonld.displayName;
+  profile.bio = profile.bio ?? jsonld.bio;
+  profile.avatar = profile.avatar ?? jsonld.avatar;
+  profile.location = profile.location ?? jsonld.location;
+  profile.company = jsonld.company;
+  profile.website = jsonld.website;
+  profile.joinedAt = jsonld.joinedAt;
+  profile.userId = jsonld.userId;
+  for (const link of jsonld.links ?? []) {
+    if (profile.links.length < 12 && !profile.links.includes(link)) profile.links.push(link);
+  }
+  profile.counts = { ...profile.counts, ...jsonld.counts };
+
   return profile;
 }
 
@@ -243,6 +392,32 @@ const NEGATIVE_TITLE = [
 ];
 
 /**
+ * Anti-bot interstitials. A CDN challenge page answers 200 with its own
+ * branding, so a status-code probe reads it as a live profile — PyPI's
+ * "Client Challenge" page scored as a real hit until this list existed.
+ * These are titles no human would choose for themselves, and they only ever
+ * appear when the site refused to serve the actual profile.
+ */
+const CHALLENGE_TITLE = [
+  /\bclient\s+challenge\b/,
+  /\bjust\s+a\s+moment\b/,
+  /\battention\s+required\b/,
+  /\baccess\s+denied\b/,
+  /\brequest\s+blocked\b/,
+  /\bsecurity\s+check\b/,
+  /\bchecking\s+your\s+browser\b/,
+  /\bverify\s+you\s+are\s+human\b/,
+  /\bare\s+you\s+a\s+(?:human|robot)\b/,
+  /\benable\s+javascript\s+and\s+cookies\b/,
+  /\bddos\s+protection\b/,
+  /\bcaptcha\b/,
+  /\bratelimited\b/,
+  /\btoo\s+many\s+requests\b/,
+  /\bservice\s+unavailable\b/,
+  /\bforbidden\b/
+];
+
+/**
  * Obvious false positives are dropped before anything reaches the user:
  * a soft-404 page, a source echoing its own brand account, or an empty shell
  * that just reflects the searched handle back.
@@ -253,6 +428,9 @@ const NEGATIVE_TITLE = [
 export function looksLikePlaceholder(site: SiteDef, profile: Profile, username: string): boolean {
   const titleText = `${profile.displayName ?? ''} ${profile.title ?? ''}`.toLowerCase();
   if (titleText.length <= 120 && NEGATIVE_TITLE.some((p) => p.test(titleText))) return true;
+  // Challenge pages arrive with a 200 and no username in the title, so they
+  // survive the NEGATIVE_TITLE check above.
+  if (titleText.length <= 120 && CHALLENGE_TITLE.some((p) => p.test(titleText))) return true;
 
   const brand = site.urlMain.replace(/^https?:\/\//, '').replace(/^www\./, '').split('.')[0];
   if (brand.length > 3 && profile.displayName?.toLowerCase() === brand) return true;
