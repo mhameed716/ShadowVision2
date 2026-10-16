@@ -1,0 +1,32 @@
+{
+  "name": "athar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Athar — an original OSINT username, email and footprint search platform.",
+  "scripts": {
+    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "next": "^15.5.28",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.6",
+    "autoprefixer": "10.4.21",
+    "postcss": "8.5.6",
+    "tailwindcss": "3.4.17",
+    "tsx": "^4.23.15",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# local database and secrets — never commit
+data/athar.db
+data/athar.db-*
+.env
+.env.local
+.env*.local
