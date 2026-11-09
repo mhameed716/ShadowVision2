@@ -9,10 +9,10 @@
 //
 // Model contract (see tools/export_mobilesam_onnx.py):
 //   encoder: image float32 NCHW [1,3,1024,1024] -> embedding [1,256,64,64]
-//   decoder: embedding + point coords + labels -> mask logits [1,1,256,256]
+//   decoder: embedding + points [1,N,2] + labels [1,N] -> logits [1,1,256,256]
 //
 // Coordinates are supplied in *image* pixels and converted here to the model's
-// normalised space, so the UI never has to know about 1024x1024.
+// padded 1024 space (sv/sam_geometry.h), so the UI never has to know about it.
 #pragma once
 
 #include <cstdint>
@@ -90,6 +90,15 @@ private:
     float m_encoder_ms = 0.f;
     float m_decoder_ms = 0.f;
 };
+
+// Real MobileSAM graphs through ONNX Runtime. Built only when SV_WITH_ORT=1:
+//   CreateOnnxEncoder() / CreateOnnxDecoder()
+// `BackendOptions.model_path` selects the graph; shapes are read from the model
+// so the 1024 default is not hard-coded a second time.
+#if SV_WITH_ORT
+std::unique_ptr<ISegmenterEncoder> CreateOnnxEncoder();
+std::unique_ptr<ISegmenterDecoder> CreateOnnxDecoder();
+#endif
 
 // A deterministic stand-in that makes the whole UI testable with no weights:
 // selects the connected region around the last prompt by colour similarity.

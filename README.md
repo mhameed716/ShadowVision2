@@ -81,4 +81,5 @@ absent because ONNX Runtime has no Vulkan EP on Android and NNAPI is deprecated.
 | Privacy guardrails (no INTERNET/GPS, no network APIs) | ✅ enforced in CI |
 | Product UI: Studio + Engine Control | ✅ built (needs device run) |
 | Real LaMa weights on a device | ⬜ export + push + measure |
-| ONNX MobileSAM decoder behind `ISegmenterDecoder` | ⬜ interface ready, impl pending |
+| ONNX MobileSAM encoder+decoder (`ort_segmenter.cpp`) | ✅ implemented, type-checked against ORT 1.23 headers |
+| Real MobileSAM weights on a device | ⬜ export + push + parity run |

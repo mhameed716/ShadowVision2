@@ -109,6 +109,10 @@ fun StudioScreen(vm: StudioViewModel, onOpenConsole: () -> Unit) {
                     "engine: ${state.engineMode}",
                     style = MaterialTheme.typography.labelSmall,
                 )
+                Text(
+                    "select: ${state.segmenterMode} · tap ${state.segmenterLatencyMs}",
+                    style = MaterialTheme.typography.labelSmall,
+                )
             }
             if (state.image != null) {
                 TextButton(onClick = { vm.revertToOriginal() }, enabled = state.resultAvailable) {
@@ -174,6 +178,22 @@ fun StudioScreen(vm: StudioViewModel, onOpenConsole: () -> Unit) {
                         if (s.zoom != zoom) s.zoom = zoom
                     },
                 )
+                if (!state.segmentationReady && !state.busy) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(10.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(SvColors.SurfaceHigh)
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            "brush only — smart select unavailable",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SvColors.Warning,
+                        )
+                    }
+                }
                 // Comparison latch: press and hold "Before".
                 if (state.resultAvailable) {
                     Box(

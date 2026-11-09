@@ -66,7 +66,7 @@ if(SV_WITH_ORT)
   if(NOT SV_ORT_ROOT)
     message(FATAL_ERROR "SV_WITH_ORT=ON requires -DSV_ORT_ROOT=<onnxruntime dir>")
   endif()
-  target_sources(sv_core PRIVATE src/ort_backend.cpp)
+  target_sources(sv_core PRIVATE src/ort_backend.cpp src/ort_segmenter.cpp)
   target_compile_definitions(sv_core PUBLIC SV_WITH_ORT=1)
   target_include_directories(sv_core PUBLIC ${SV_ORT_ROOT}/include)
   # Android ships libonnxruntime.so in jniLibs; host uses the static/dynamic lib.

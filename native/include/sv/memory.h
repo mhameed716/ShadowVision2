@@ -58,7 +58,17 @@ public:
         Lease() = default;
         Lease(const char* label, size_t bytes) : label(label), bytes(bytes) {}
         Lease(Lease&& o) noexcept : label(o.label), bytes(o.bytes), live(o.live) { o.live = false; }
-        Lease& operator=(Lease&&) = delete;
+        // Move-assign is safe and needed: sessions move leases into containers.
+        Lease& operator=(Lease&& o) noexcept {
+            if (this != &o) {
+                if (live) MemoryGovernor::global().release(label, bytes);
+                label = o.label;
+                bytes = o.bytes;
+                live = o.live;
+                o.live = false;
+            }
+            return *this;
+        }
         Lease(const Lease&) = delete;
         ~Lease();
         const char* label = "";

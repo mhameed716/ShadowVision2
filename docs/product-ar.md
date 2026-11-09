@@ -17,6 +17,8 @@
 | `native/src/manifest.cpp` | محلّل الكتالوج الموقّع + تحقق Ed25519 + رفض تجاوز المسارات |
 | `native/third_party/ed25519/` | Ed25519 (Orson Peters، رخصة zlib) — 11 ملفاً |
 | `native/src/segmenter.cpp` | `SegmentationSession`: encoder/decoder منفصلان + فلتر أكبر مكوّن |
+| `native/src/ort_segmenter.cpp` | **MobileSAM الحقيقي عبر ONNX Runtime** (encoder + decoder) |
+| `native/include/sv/sam_geometry.h` | هندسة SAM النقية: resize/pad/تحويل الإحداثيات/التطبيع |
 | `native/include/sv/sv_c_api.h` | **ABI v2**: 13 دالة (كانت 6) |
 
 ### أندرويد — المنتج
@@ -131,6 +133,22 @@ cd android && ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### المحدد الحقيقي (MobileSAM)
+
+```bash
+python3 tools/export_mobilesam_onnx.py --ckpt weights/mobile_sam.pt --out-dir models
+#   يطبع: parity: encoder max|diff|=… decoder max|diff|=…
+#   إن تجاوز 1e-2 يتوقف بسكربت التصدير — لا تُشحن رسوم لا تطابق PyTorch
+python3 tools/sign_catalog.py sign --catalog models/catalog.txt --key keys/dev.key --models models/
+cp models/catalog.signed.txt android/app/src/main/assets/
+```
+عند التشغيل: إن تحقّق الكتالوج ووُجد الرسمان ⇒ `SvEngine.loadSegmenter(enc, dec)` يحمّل
+MobileSAM. وإن فشل أحدهما يعود التطبيق إلى المحدد المدمج **ويقول ذلك في الشريط العلوي**،
+ويظهر شعار «brush only» بدل زر تحديد صامت لا يعمل.
+
+**هندسة SAM مكتوبة كدوال نقية** (`sam_geometry.h`) ومغطاة باختبارات: 1920×1080 → 1024×576
+مع حشو 448 في الأسفل، و4032×3024 → 1024×768، والتحويل العكسي يعود داخل بكسل واحد.
+
 **بدون أي من ذلك** يعمل التطبيق: محرك الإزالة المدمج (synthetic) + المحدد المدمج،
 لأن الغرض من البناء الأول أن يكون قابلاً للتجربة لا أن يكون معطّلاً.
 
@@ -140,7 +158,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | المكوّن | الحالة | ما يلزم |
 |---|---|---|
-| Segmenter | **built-in** (نموّ لوني) وليس MobileSAM | تنفيذ `ISegmenterDecoder` لـONNX (الواجهة جاهزة، لا تغيير في الواجهة) |
+| Segmenter | **ONNX الحقيقي منفَّذ** (`ort_segmenter.cpp`)؛ البديل المدمج يبقى للعمل بلا أوزان | تصدير الأوزان + `adb push` + إعادة التوقيع |
 | Inpainter | built-in بلا أوزان | LaMa ONNX (المسار مبني ومختبر) |
 | مفتاح التوقيع | `dev-0001` | مفتاح إصدار + تبديل `DEV_PUBLIC_KEY` |
 | التوقيع في الإصدار | debug signing | keystore إصدار + Play App Signing |

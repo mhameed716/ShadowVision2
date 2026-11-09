@@ -2,6 +2,7 @@
 #include "sv/kernels.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -104,6 +105,67 @@ void ResizeBilinearMask(const Mask& src, int dst_w, int dst_h, uint8_t* dst, int
             const float bot = (1.f - tx) * src.data[static_cast<size_t>(y1) * src.stride + x0] +
                               tx * src.data[static_cast<size_t>(y1) * src.stride + x1];
             out[x] = static_cast<uint8_t>(std::clamp((1.f - ty) * top + ty * bot + 0.5f, 0.f, 255.f));
+        }
+    }
+}
+
+void ResizeAreaRGB(const ImageRGB& src, int dst_w, int dst_h, MutableImageRGB dst) {
+    if (!src.valid() || !dst.valid() || dst_w <= 0 || dst_h <= 0) return;
+    // Two-pass box filter (horizontal then vertical) with fractional coverage.
+    // O(dst * support) per axis; for 4x downscale the support is ~4 px/side.
+    const float sx = static_cast<float>(src.width) / dst_w;
+    const float sy = static_cast<float>(src.height) / dst_h;
+    std::vector<float> tmp(static_cast<size_t>(dst_w) * src.height * 3, 0.f);
+
+    for (int y = 0; y < src.height; ++y) {
+        const uint8_t* row = src.data + static_cast<size_t>(y) * src.stride;
+        float* out = tmp.data() + static_cast<size_t>(y) * dst_w * 3;
+        for (int x = 0; x < dst_w; ++x) {
+            const float x0 = x * sx;
+            const float x1 = std::min(static_cast<float>(src.width), x0 + sx);
+            int i0 = static_cast<int>(x0);
+            const int i1 = std::min(src.width - 1, static_cast<int>(std::ceil(x1)) - 1);
+            float r = 0, g = 0, b = 0, wsum = 0;
+            for (int i = i0; i <= i1; ++i) {
+                const float lo = std::max(x0, static_cast<float>(i));
+                const float hi = std::min(x1, static_cast<float>(i + 1));
+                const float wgt = hi - lo;
+                if (wgt <= 0) continue;
+                r += row[i * 3 + 0] * wgt;
+                g += row[i * 3 + 1] * wgt;
+                b += row[i * 3 + 2] * wgt;
+                wsum += wgt;
+            }
+            if (wsum <= 0) wsum = 1;
+            out[x * 3 + 0] = r / wsum;
+            out[x * 3 + 1] = g / wsum;
+            out[x * 3 + 2] = b / wsum;
+        }
+    }
+
+    for (int y = 0; y < dst_h; ++y) {
+        const float y0 = y * sy;
+        const float y1 = std::min(static_cast<float>(src.height), y0 + sy);
+        const int j0 = static_cast<int>(y0);
+        const int j1 = std::min(src.height - 1, static_cast<int>(std::ceil(y1)) - 1);
+        uint8_t* out = dst.data + static_cast<size_t>(y) * dst.stride;
+        for (int x = 0; x < dst_w; ++x) {
+            float r = 0, g = 0, b = 0, wsum = 0;
+            for (int j = j0; j <= j1; ++j) {
+                const float lo = std::max(y0, static_cast<float>(j));
+                const float hi = std::min(y1, static_cast<float>(j + 1));
+                const float wgt = hi - lo;
+                if (wgt <= 0) continue;
+                const float* p = tmp.data() + (static_cast<size_t>(j) * dst_w + x) * 3;
+                r += p[0] * wgt;
+                g += p[1] * wgt;
+                b += p[2] * wgt;
+                wsum += wgt;
+            }
+            if (wsum <= 0) wsum = 1;
+            out[x * 3 + 0] = static_cast<uint8_t>(std::clamp(r / wsum + 0.5f, 0.f, 255.f));
+            out[x * 3 + 1] = static_cast<uint8_t>(std::clamp(g / wsum + 0.5f, 0.f, 255.f));
+            out[x * 3 + 2] = static_cast<uint8_t>(std::clamp(b / wsum + 0.5f, 0.f, 255.f));
         }
     }
 }

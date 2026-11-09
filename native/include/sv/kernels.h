@@ -21,6 +21,12 @@ void DownsampleAreaRGB(const ImageRGB& src, int factor, MutableImageRGB dst);
 void DownsampleAreaMask(const Mask& src, int factor, uint8_t* dst, int dst_stride);
 
 void ResizeBilinearRGB(const ImageRGB& src, int dst_w, int dst_h, MutableImageRGB dst);
+
+// Area-average resize to an arbitrary target size (box filter). This is the
+// correct filter for *downscaling*: it is what PIL's antialiased resize
+// approximates, and the difference is visible on textures (fabric, foliage)
+// where point sampling produces moire that the encoder then reads as structure.
+void ResizeAreaRGB(const ImageRGB& src, int dst_w, int dst_h, MutableImageRGB dst);
 void ResizeBilinearMask(const Mask& src, int dst_w, int dst_h, uint8_t* dst, int dst_stride);
 
 // --- Mask morphology ------------------------------------------------------

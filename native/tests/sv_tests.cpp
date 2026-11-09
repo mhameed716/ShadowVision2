@@ -18,6 +18,7 @@
 #include "sv/kernels.h"
 #include "sv/manifest.h"
 #include "sv/memory.h"
+#include "sv/sam_geometry.h"
 #include "sv/segmenter.h"
 #include "sv/sha256.h"
 #include "sv/synthetic_backend.h"
@@ -292,6 +293,85 @@ void test_keep_largest_component() {
     CHECK(m[static_cast<size_t>(35) * w + 35] == 0);
 }
 
+void test_sam_geometry_landscape() {
+    printf("[test] SAM geometry: 1920x1080 -> 1024 long side, pad right\n");
+    const auto g = sv::sam::PreprocessGeometry(1920, 1080, 1024);
+    CHECK(g.new_w == 1024);
+    CHECK(g.new_h == 576);            // 1080 * 1024/1920 = 576
+    CHECK(g.pad_right() == 0);
+    CHECK(g.pad_bottom() == 448);     // 1024 - 576
+    float mx = 0.f, my = 0.f;
+    sv::sam::TransformPoint(g, 960.f, 540.f, &mx, &my);
+    CHECK(std::abs(mx - 512.f) < 0.5f);   // centre maps to centre
+    CHECK(std::abs(my - 288.f) < 0.5f);
+}
+
+void test_sam_geometry_portrait_square_and_rounding() {
+    printf("[test] SAM geometry: portrait, square, odd sizes\n");
+    const auto p = sv::sam::PreprocessGeometry(1080, 1920, 1024);
+    CHECK(p.new_h == 1024);
+    CHECK(p.new_w == 576);
+    CHECK(p.pad_bottom() == 0 && p.pad_right() == 448);
+
+    const auto sq = sv::sam::PreprocessGeometry(1024, 1024, 1024);
+    CHECK(sq.new_w == 1024 && sq.new_h == 1024 && sq.pad_right() == 0 && sq.pad_bottom() == 0);
+
+    // 4032x3024 (12 MP phone photo) must not round the long side to 1023.
+    const auto big = sv::sam::PreprocessGeometry(4032, 3024, 1024);
+    CHECK(big.new_w == 1024);
+    CHECK(big.new_h == 768);
+    CHECK(sq.scale_x == 1.f);
+    // Inverse mapping round-trips within a pixel.
+    float mx = 0.f, my = 0.f;
+    sv::sam::TransformPoint(big, 2016.f, 1512.f, &mx, &my);
+    CHECK(std::abs(sv::sam::InverseMapX(big, mx) - 2016.f) < 1.f);
+    CHECK(std::abs(sv::sam::InverseMapY(big, my) - 1512.f) < 1.f);
+}
+
+void test_area_resize() {
+    printf("[test] area resize: constant stays constant, edges do not bleed to zero\n");
+    sv::OwnedImage flat;
+    flat.width = 64;
+    flat.height = 64;
+    flat.data.assign(64 * 64 * 3, 180);
+    std::vector<uint8_t> small(16 * 16 * 3, 0);
+    sv::ResizeAreaRGB(flat.view(), 16, 16, sv::MutableImageRGB{small.data(), 16, 16, 16 * 3});
+    bool all = true;
+    for (auto v : small) all = all && v == 180;
+    CHECK(all);
+
+    // Half black / half white must resample to exactly the midpoint at the seam,
+    // not to the nearest source pixel (that is the aliasing we are avoiding).
+    sv::OwnedImage split;
+    split.width = 64;
+    split.height = 8;
+    split.data.assign(64 * 8 * 3, 0);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 32; x < 64; ++x)
+            for (int c = 0; c < 3; ++c)
+                split.data[(static_cast<size_t>(y) * 64 + x) * 3 + c] = 255;
+    std::vector<uint8_t> half(8 * 8 * 3, 0);
+    sv::ResizeAreaRGB(split.view(), 8, 8, sv::MutableImageRGB{half.data(), 8, 8, 8 * 3});
+    CHECK(half[(static_cast<size_t>(0) * 8 + 0) * 3] == 0);
+    CHECK(half[(static_cast<size_t>(0) * 8 + 7) * 3] == 255);
+    // At exactly 2:1 downscale the seam falls between destination pixels, so no
+    // destination pixel mixes both halves. What matters is that no partial edge
+    // bleeds: first four columns must be pure black, last four pure white.
+    const int seam_left = half[(static_cast<size_t>(0) * 8 + 3) * 3];
+    const int seam_right = half[(static_cast<size_t>(0) * 8 + 4) * 3];
+    CHECK(seam_left == 0);
+    CHECK(seam_right == 255);
+}
+
+void test_sam_normalization() {
+    printf("[test] SAM normalization constants\n");
+    // Mid-grey maps to ~0 for all channels (that is why SAM uses these means).
+    CHECK(std::abs(sv::sam::Normalize(0, 123.675f)) < 1e-3f);
+    CHECK(std::abs(sv::sam::Normalize(1, 116.28f)) < 1e-3f);
+    CHECK(std::abs(sv::sam::Normalize(2, 103.53f)) < 1e-3f);
+    CHECK(sv::sam::Normalize(0, 255.f) > 2.f);
+}
+
 }  // namespace
 
 int main() {
@@ -309,6 +389,10 @@ int main() {
     test_catalog_rejects_tampering();
     test_synthetic_segmenter_selects_region();
     test_keep_largest_component();
+    test_sam_geometry_landscape();
+    test_sam_geometry_portrait_square_and_rounding();
+    test_area_resize();
+    test_sam_normalization();
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

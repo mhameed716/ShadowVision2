@@ -44,7 +44,7 @@ if(SV_WITH_ORT)
   add_library(onnxruntime SHARED IMPORTED)
   set_target_properties(onnxruntime PROPERTIES
     IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libonnxruntime.so)
-  target_sources(sv_core PRIVATE ${SV_NATIVE_ROOT}/src/ort_backend.cpp)
+  target_sources(sv_core PRIVATE ${SV_NATIVE_ROOT}/src/ort_backend.cpp ${SV_NATIVE_ROOT}/src/ort_segmenter.cpp)
   target_compile_definitions(sv_core PUBLIC SV_WITH_ORT=1)
   target_include_directories(sv_core PUBLIC ${SV_ORT_ROOT}/include)
   target_link_libraries(sv_core PUBLIC onnxruntime)

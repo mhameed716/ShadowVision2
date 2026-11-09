@@ -47,6 +47,8 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         val brushRadius: Float = 24f,
         val zoom: Float = 1f,
         val engineMode: String = "built-in",
+        val segmenterMode: String = "built-in (no model installed)",
+        val segmenterLatencyMs: String = "—",
         val lastReport: SvEngine.Report? = null,
         val segmentationReady: Boolean = false,
         /** Bumped every time a native selection is produced, so the canvas can
@@ -64,7 +66,8 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
     init {
         SvEngine.init(budgetMb = 1200)
         // The built-in segmenter keeps the studio usable with no models at all;
-        // a catalog model replaces it when one verifies (D10).
+        // a verified catalog model replaces it (D10). Never the other way round:
+        // a model that fails verification must not be loaded "just to try".
         SvEngine.loadSegmenter(null, null)
         _state.value = _state.value.copy(engineMode = "built-in (no model installed)")
         loadCatalog()
@@ -74,6 +77,23 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val ctx = getApplication<Application>()
             val result = ModelCatalog.load(ctx)
+
+            // --- segmenter: encoder + decoder, both verified, both present ----
+            val encEntry = result.entries.firstOrNull { it.id.startsWith("mobilesam.encoder") }
+            val decEntry = result.entries.firstOrNull { it.id.startsWith("mobilesam.decoder") }
+            if (result.verified && encEntry != null && decEntry != null) {
+                val encPath = ModelCatalog.pathFor(ctx, encEntry)
+                val decPath = ModelCatalog.pathFor(ctx, decEntry)
+                if (encPath != null && decPath != null) {
+                    val segRc = SvEngine.loadSegmenter(encPath, decPath)
+                    _state.value = _state.value.copy(
+                        segmenterMode = if (segRc == SvEngine.OK)
+                            "MobileSAM (1024 px, split encoder/decoder)"
+                        else "built-in (load failed: ${SvEngine.describe(segRc)})",
+                    )
+                }
+            }
+
             val entry = result.entries.firstOrNull { it.id.startsWith("lama") }
             if (result.verified && entry != null) {
                 val path = ModelCatalog.pathFor(ctx, entry)
@@ -198,13 +218,16 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
     /** Smart select: one tap -> native decoder -> mask. 30-80 ms on the worker. */
     fun smartSelect(x: Int, y: Int, currentMask: ByteArray?, w: Int, h: Int) {
         viewModelScope.launch {
+            val t0 = System.currentTimeMillis()
             val rc = SvEngine.tapToMask(listOf(SvEngine.Tap(x, y, true)), w, h)
+            val tookMs = System.currentTimeMillis() - t0
             if (rc.status == SvEngine.OK && rc.mask != null) {
                 pendingSegMask = rc.mask
                 _state.value = _state.value.copy(
                     message = "Region selected — refine with the brush, then remove",
                     hasMask = true,
                     selectionVersion = _state.value.selectionVersion + 1,
+                    segmenterLatencyMs = "$tookMs ms",
                 )
             } else {
                 _state.value = _state.value.copy(

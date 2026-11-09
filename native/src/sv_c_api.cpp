@@ -201,13 +201,17 @@ int32_t sv_load_segmenter(const char* encoder_path, const char* decoder_path) {
                                                 sv::CreateSyntheticDecoder()));
         g_seg_source = "built-in";
     } else {
-        // ONNX segmenter implementation lives in ort_segmenter.cpp behind
-        // SV_WITH_ORT; until then the built-in one keeps the studio usable.
-        __android_log_print(ANDROID_LOG_WARN, SV_LOG_TAG,
-                            "onnx segmenter not built in this configuration; using built-in");
-        g_seg.reset(new sv::SegmentationSession(sv::CreateSyntheticEncoder(),
-                                                sv::CreateSyntheticDecoder()));
-        g_seg_source = "built-in (onnx unavailable)";
+#if SV_WITH_ORT
+        g_seg.reset(new sv::SegmentationSession(sv::CreateOnnxEncoder(),
+                                                sv::CreateOnnxDecoder()));
+        g_seg_source = "MobileSAM (onnx)";
+#else
+        // Built without ONNX Runtime: refusing is better than silently substituting
+        // a different algorithm under the same button.
+        __android_log_print(ANDROID_LOG_ERROR, SV_LOG_TAG,
+                            "segmenter model requested but this build has no ONNX Runtime");
+        return SV_ERR_BACKEND_UNAVAILABLE;
+#endif
     }
     sv::BackendOptions enc;
     sv::BackendOptions dec;
@@ -215,6 +219,8 @@ int32_t sv_load_segmenter(const char* encoder_path, const char* decoder_path) {
     if (decoder_path) dec.model_path = decoder_path;
     const sv::Status st = g_seg->load(enc, dec);
     if (st != sv::Status::Ok) {
+        __android_log_print(ANDROID_LOG_ERROR, SV_LOG_TAG, "segmenter load failed: %s",
+                            sv::ToString(st));
         g_seg.reset();
         return to_c(st);
     }

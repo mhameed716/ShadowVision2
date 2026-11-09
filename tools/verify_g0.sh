@@ -48,6 +48,27 @@ say "4/7 JNI + C ABI type-check (no NDK needed)"
   -DSV_WITH_ORT=0 "${ROOT}/native/src/sv_c_api.cpp"
 echo "jni_bridge.cpp + sv_c_api.cpp: OK"
 
+say "4b/7 ONNX translation units type-check (real ORT headers when available)"
+# The ONNX backends (inpainting + segmentation) are only compiled with
+# -DSV_WITH_ORT=ON, i.e. never on this machine — which is exactly how a
+# signature error survives until a device build. If ORT headers are present we
+# type-check them here; otherwise we say so instead of pretending.
+ORT_INC="${SV_ORT_INCLUDE:-}"
+if [ -z "${ORT_INC}" ] && [ -d /tmp/ortinc/onnxruntime/core/session ]; then
+  ORT_INC=/tmp/ortinc/onnxruntime/core/session
+fi
+if [ -n "${ORT_INC}" ] && [ -f "${ORT_INC}/onnxruntime_cxx_api.h" ]; then
+  for f in src/ort_backend.cpp src/ort_segmenter.cpp; do
+    "$CXX" -std=c++17 -fsyntax-only -Wall -Wextra -DSV_WITH_ORT=1 \
+      -I"${ROOT}/native/include" -I"${ORT_INC}" "${ROOT}/native/${f}"
+    echo "  ${f}: OK"
+  done
+else
+  echo "  skipped: ONNX Runtime headers not found."
+  echo "  To enable: fetch the include/ tree from the ORT release and set"
+  echo "  SV_ORT_INCLUDE=/path/to/onnxruntime/include"
+fi
+
 say "5/7 unit tests"
 "${BUILD_DIR}/sv_tests"
 
@@ -95,7 +116,11 @@ int main(int argc, char** argv) {
     return ok ? 0 : 1;
 }
 CPP
-"$CXX" -std=c++17 -I"${ROOT}/native/include" "${BUILD_DIR}/catalog_check.cpp" \
+# Carry the sanitizer runtime into the ad-hoc binary too, otherwise --asan
+# fails at link time with undefined __asan_* symbols from libsv_core.
+SAN_FLAGS=""
+[ "${SAN}" = "ON" ] && SAN_FLAGS="-fsanitize=address,undefined"
+"$CXX" -std=c++17 ${SAN_FLAGS} -I"${ROOT}/native/include" "${BUILD_DIR}/catalog_check.cpp" \
   "${BUILD_DIR}/libsv_core.a" "${BUILD_DIR}/libsv_ed25519.a" -o "${BUILD_DIR}/catalog_check"
 "${BUILD_DIR}/catalog_check" "${ROOT}/models/catalog.signed.txt" "${KEYS}/dev.pub"
 

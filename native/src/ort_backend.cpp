@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -67,7 +68,7 @@ public:
                 // The QNN provider is only present in builds linked against the
                 // QNN AAR. If it is absent ORT throws here and we degrade to CPU,
                 // which is the contract: never crash over an accelerator.
-                std::map<std::string, std::string> qnn;
+                std::unordered_map<std::string, std::string> qnn;
                 qnn["backend_type"] = "htp";
                 qnn["htp_performance_mode"] = "burst";
                 if (!opts.qnn_context_bin.empty()) {

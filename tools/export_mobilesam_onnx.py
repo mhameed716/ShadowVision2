@@ -53,6 +53,11 @@ def main() -> int:
             self.m = m
 
         def forward(self, image):
+            # The encoder wraps its own SAM normalization (mean/std) as registered
+            # buffers, so the graph expects RAW 0..255 RGB, not normalized input.
+            # The C++ side normalizes anyway (sv/sam_geometry.h) — SAM's mean/std
+            # are near-idempotent under a second normalization, but if you change
+            # one side, change both and re-run the parity check printed below.
             return self.m.image_encoder(image)
 
     enc = Encoder(sam).eval()
@@ -96,6 +101,42 @@ def main() -> int:
         opset_version=17, do_constant_folding=True, dynamic_axes=None,
     )
     print(f"wrote {dec_path}")
+
+    # ---- parity check: the exported graphs must reproduce PyTorch ------------
+    # This is the check that catches the two classic integration bugs before the
+    # phone does: a wrong coordinate transform, and a mask thresholded at the
+    # wrong side. It runs on a synthetic image so it is deterministic.
+    try:
+        import numpy as np
+        import onnxruntime as ort
+
+        enc_sess = ort.InferenceSession(enc_path, providers=["CPUExecutionProvider"])
+        dec_sess = ort.InferenceSession(dec_path, providers=["CPUExecutionProvider"])
+
+        rng = np.random.default_rng(0)
+        img = (rng.random((1, 3, s, s), dtype=np.float32) * 255.0)
+        emb_onnx = enc_sess.run(None, {"image": img})[0]
+        with torch.no_grad():
+            emb_torch = enc.image_encoder(torch.from_numpy(img)).numpy()
+        emb_err = float(np.abs(emb_onnx - emb_torch).max())
+
+        pts_np = np.array([[[s / 2.0, s / 2.0]]], dtype=np.float32)
+        lbl_np = np.array([[1]], dtype=np.float32)
+        logits_onnx = dec_sess.run(None, {"embedding": emb_onnx, "points": pts_np,
+                                          "labels": lbl_np})[0]
+        with torch.no_grad():
+            logits_torch = dec(torch.from_numpy(emb_onnx), torch.from_numpy(pts_np),
+                               torch.from_numpy(lbl_np)).numpy()
+        logit_err = float(np.abs(logits_onnx - logits_torch).max())
+
+        print(f"parity: encoder max|diff|={emb_err:.3e}  decoder max|diff|={logit_err:.3e}")
+        if emb_err > 1e-2 or logit_err > 1e-2:
+            print("PARITY FAILED: the ONNX graphs do not match PyTorch. Do not ship.",
+                  file=sys.stderr)
+            return 4
+        print("parity OK (threshold 1e-2)")
+    except ImportError:
+        print("note: install numpy + onnxruntime for the parity check", file=sys.stderr)
     print("\nNote: the C++ ISegmenterDecoder implementation for these graphs is not "
           "wired yet (sv_load_segmenter falls back to the built-in segmenter). "
           "Ship the built-in one first, then add the ONNX decoder behind the same "
