@@ -41,6 +41,19 @@ target_compile_options(sv_core PRIVATE -O2 -fvisibility=hidden -Wall -Wextra)
 
 option(SV_WITH_ORT "Link ONNX Runtime into the app" OFF)
 if(SV_WITH_ORT)
+  if(NOT SV_ORT_ROOT)
+    set(SV_ORT_ROOT ${SV_NATIVE_ROOT}/../third_party/onnxruntime-android)
+  endif()
+  if(NOT EXISTS ${SV_ORT_ROOT}/include/onnxruntime_cxx_api.h)
+    message(FATAL_ERROR
+      "SV_WITH_ORT=ON but no headers at ${SV_ORT_ROOT}/include. "
+      "Run tools/fetch_onnxruntime_android.sh first.")
+  endif()
+  if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libonnxruntime.so)
+    message(FATAL_ERROR
+      "SV_WITH_ORT=ON but jniLibs/${ANDROID_ABI}/libonnxruntime.so is missing. "
+      "Run tools/fetch_onnxruntime_android.sh first.")
+  endif()
   add_library(onnxruntime SHARED IMPORTED)
   set_target_properties(onnxruntime PROPERTIES
     IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libonnxruntime.so)

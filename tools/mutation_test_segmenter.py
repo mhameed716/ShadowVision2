@@ -68,6 +68,18 @@ MUTANTS: list[tuple[str, str, str, str]] = [
     # suite. The guard is therefore asserted indirectly (mask_short above) and is
     # left out of the mutant list rather than listed and quietly surviving.
 
+    # --- the NHWC / Acly-interface path -------------------------------------
+    ("acly_square_frame", "src/ort_segmenter.cpp",
+     ": sam::PreprocessGeometry(image.width, image.height, s);",
+     ": sam::PreprocessGeometry(image.width, image.height, s / 2);"),
+    # The encoder's NHWC branch collapses into the padded branch: the graph then
+    # receives a 256x192 content area where it expects a full 256x256 frame.
+    ("acly_padded_encoder", "src/ort_segmenter.cpp",
+     "const auto geom = m_layout == EncoderLayout::NHWC",
+     "const auto geom = false && m_layout == EncoderLayout::NHWC"),
+    ("double_normalise", "src/ort_segmenter.cpp",
+     "const bool normalise = m_layout == EncoderLayout::NCHW;",
+     "const bool normalise = true;"),
     ("pad_left", "include/sv/sam_geometry.h",
      "g.scale_x = static_cast<float>(g.new_w) / static_cast<float>(img_w);",
      "g.scale_x = static_cast<float>(g.model_size) / static_cast<float>(img_w);"),
@@ -117,6 +129,13 @@ def main() -> int:
             return 2
         enc = os.path.join(graphs, "test_encoder.onnx")
         dec = os.path.join(graphs, "test_decoder.onnx")
+        acly_dir = os.path.join(tmp, "graphs_acly")
+        subprocess.run([sys.executable, os.path.join(ROOT, "tools/make_test_graphs.py"),
+                        "--out", acly_dir, "--embed-side", "16", "--interface", "acly"],
+                       check=True, capture_output=True, text=True)
+        graphs_argv = [enc, dec,
+                       os.path.join(acly_dir, "acly_encoder.onnx"),
+                       os.path.join(acly_dir, "acly_decoder.onnx")]
 
         clean = os.path.join(tmp, "clean")
         shutil.copytree(os.path.join(ROOT, "native"), clean)
@@ -124,7 +143,7 @@ def main() -> int:
         if not build(clean, inc, lib_dir, base_bin, rt_dir):
             print("the unmutated suite does not build; fix that first", file=sys.stderr)
             return 2
-        r = subprocess.run([base_bin, enc, dec], capture_output=True, text=True)
+        r = subprocess.run([base_bin, *graphs_argv], capture_output=True, text=True)
         if r.returncode != 0:
             print("the unmutated suite is not green, so mutation results mean nothing:\n" +
                   r.stdout + r.stderr, file=sys.stderr)
@@ -154,7 +173,7 @@ def main() -> int:
                 # caught the change; count it as killed and say so.
                 print(f"  KILLED {name} (does not compile)")
                 continue
-            res = subprocess.run([binary, enc, dec], capture_output=True, text=True)
+            res = subprocess.run([binary, *graphs_argv], capture_output=True, text=True)
             if res.returncode == 0:
                 print(f"  SURVIVED {name}: the suite stayed green — assertion too weak")
                 survived.append(name)

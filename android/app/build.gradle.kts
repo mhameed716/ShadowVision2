@@ -13,6 +13,24 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.0"
 }
 
+// Release signing. A debug-signed release build cannot be distributed: it
+// expires, it is refused by some installers, and it cannot be updated by a
+// properly signed build later. Credentials come from the environment (CI) or
+// keystore.properties (local, git-ignored) — never from this file.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun secret(key: String, env: String): String? =
+    keystoreProps.getProperty(key) ?: System.getenv(env)
+
+val releaseStore: String? = secret("storeFile", "SV_KEYSTORE_FILE")
+val releaseAlias: String? = secret("keyAlias", "SV_KEY_ALIAS")
+val releaseStorePass: String? = secret("storePassword", "SV_KEYSTORE_PASSWORD")
+val releaseKeyPass: String? = secret("keyPassword", "SV_KEY_PASSWORD")
+val hasReleaseKey = listOf(releaseStore, releaseAlias, releaseStorePass, releaseKeyPass)
+    .all { !it.isNullOrBlank() }
+
 // NDK / ORT paths can be supplied without editing this file:
 //   local.properties:  sv.ortRoot=/path/to/onnxruntime-android
 // or Gradle property:   -Psv.ortRoot=...
@@ -74,7 +92,29 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             manifestPlaceholders["g0Enabled"] = "false"
-            signingConfig = signingConfigs.getByName("debug")  // replace before Play
+            // A release build MUST be signed with a real key. Falling back to the
+            // debug key silently produces an APK that looks shippable and is not,
+            // so the fallback is opt-in (sv.allowDebugSigning) and logged as a
+            // warning for anyone who asks for it.
+            val allowDebugSign = (project.findProperty("sv.allowDebugSigning") == "true")
+            if (hasReleaseKey) {
+                signingConfig = signingConfigs.create("release") {
+                    storeFile = file(releaseStore!!)
+                    storePassword = releaseStorePass
+                    keyAlias = releaseAlias
+                    keyPassword = releaseKeyPass
+                }
+            } else if (allowDebugSign) {
+                logger.warn("WARNING: release build is DEBUG-SIGNED (-Psv.allowDebugSigning=true). " +
+                    "This APK must not be published.")
+                signingConfig = signingConfigs.getByName("debug")
+            } else {
+                throw GradleException(
+                    "No release signing key. Provide SV_KEYSTORE_FILE/SV_KEY_ALIAS/" +
+                    "SV_KEYSTORE_PASSWORD/SV_KEY_PASSWORD (or keystore.properties), " +
+                    "or pass -Psv.allowDebugSigning=true for a local, non-publishable " +
+                    "build. Run tools/make_release_keystore.sh once to create one.")
+            }
         }
     }
 
@@ -92,6 +132,9 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+    // SvEngine and both screens are coroutine-based; this was missing entirely,
+    // so nothing in the app could compile.
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")

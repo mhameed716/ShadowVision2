@@ -85,6 +85,13 @@ else
   echo "  skipped: PyYAML not installed"
 fi
 
+say "4d/7 Android build wiring (no JDK/SDK needed)"
+python3 "${ROOT}/tools/check_jni_binding.py"
+# The Gradle module referenced dependencies it never declared (coroutines) and an
+# AppCompat activity with no AppCompat on the classpath. A static audit of the
+# build files catches that class of break before a 20-minute CI run does.
+python3 "${ROOT}/tools/check_android_build.py"
+
 say "5/7 unit tests"
 "${BUILD_DIR}/sv_tests"
 

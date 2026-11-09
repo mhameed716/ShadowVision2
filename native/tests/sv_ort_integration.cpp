@@ -131,6 +131,178 @@ bool TapAt(sv::SegmentationSession& session, float x, float y, int w, int h,
 
 }  // namespace
 
+// Absolute reference for the ENCODER. A tap-round-trip cannot see an encoder-side
+// scaling error: the encoder misplaces the point, the decoder maps it back with
+// its own (correct) geometry, and the mask still lands on the finger. The error
+// cancels. Only an absolute observation catches it.
+//
+// The test encoder is a block-mean pooling encoder, so a bright patch at known
+// image coordinates produces a hot block at a predictable embedding index. If the
+// transform in front of it is wrong (padded vs stretched, wrong scale), the hot
+// block moves — and that is measurable without the decoder at all.
+static void CheckEncoderGeometry(const std::string& enc_path, const std::string& dec_path,
+                                 bool expect_normalised, const char* label) {
+    sv::BackendOptions eo, dopts;
+    eo.model_path = enc_path;
+    dopts.model_path = dec_path;
+    auto enc = sv::CreateOnnxEncoder();
+    auto dec = sv::CreateOnnxDecoder();
+    if (enc->load(eo) != sv::Status::Ok || dec->load(dopts) != sv::Status::Ok) {
+        Check(false, std::string(label) + ": encoder/decoder load for the geometry probe");
+        return;
+    }
+
+    // Black 400x300 image with a white square covering whole embedding blocks.
+    // 400 image px -> 256 model px (0.64), and one embedding block is 16 model px
+    // = 25 image px. Use a 50x50 image-px square aligned to that grid so the
+    // pooled value is not diluted by the black border.
+    const int w = 400, h = 300;
+    std::vector<uint8_t> px(static_cast<size_t>(w) * h * 3, 0);
+    for (int y = 75; y < 125; ++y)
+        for (int x = 300; x < 350; ++x)
+            for (int c = 0; c < 3; ++c)
+                px[(static_cast<size_t>(y) * w + x) * 3 + c] = 255;
+    sv::ImageRGB img{px.data(), w, h, w * 3};
+
+    std::vector<float> emb;
+    std::vector<int64_t> shape;
+    if (enc->encode(img, &emb, &shape) != sv::Status::Ok || shape.size() != 4) {
+        Check(false, std::string(label) + ": encode for the geometry probe");
+        return;
+    }
+    const int side = static_cast<int>(shape[2]);
+    // channel 0 only: the test encoder carries R in channel 0.
+    size_t best = 0;
+    float best_v = -1e30f;
+    for (int y = 0; y < side; ++y) {
+        for (int x = 0; x < side; ++x) {
+            const float v = emb[static_cast<size_t>(y) * side + x];
+            if (v > best_v) { best_v = v; best = static_cast<size_t>(y) * side + x; }
+        }
+    }
+    const double fx = static_cast<double>(best % side) / (side - 1);
+    const double fy = static_cast<double>(best / side) / (side - 1);
+    // Expected normalised position of the patch centre (324, 84) in the frame:
+    //   NCHW: content is 256x192 in a 256 frame -> x 324/400=0.81, y 84/300=0.28
+    //   NHWC (square stretch): the frame spans the image, same fractions.
+    // Either way the hot block must be in the lower-right quadrant, well away
+    // from the centre: that is what a padded/stretched confusion breaks.
+    Check(fx > 0.65 && fy > 0.15,
+          std::string(label) + ": hot embedding block sits where the patch is "
+          "(x=" + std::to_string(fx) + " y=" + std::to_string(fy) + ")");
+    Check(fx > 0.65 && fy < 0.55,
+          std::string(label) + ": hot block is low but not at the very bottom");
+
+    // Absolute scale: NCHW graphs are fed pre-normalised values, so a fully lit
+    // block is ~ (255-123.675)/58.395 = 2.25. NHWC graphs are fed raw 0..255.
+    // A double-normalisation bug shows up here and nowhere else.
+    // Absolute scale, with generous slack for the pooled edge blocks: NCHW graphs
+    // are fed pre-normalised floats (a lit, unpooled pixel is ~2.25), NHWC graphs
+    // are fed raw 0..255. Double normalisation would put the NCHW value near 0.85
+    // and the NHWC value near 173 — both are outside this window.
+    const double expected = expect_normalised ? (255.0 - 123.675) / 58.395 : 255.0;
+    // Frame invariant: an NHWC encoder consumes a full s x s frame, so the
+    // encoder must have resized to exactly s x s. A padded (content-height)
+    // frame would leave the bottom rows zero and the square promise broken.
+    {
+        std::vector<uint8_t> probe_px(static_cast<size_t>(w) * h * 3, 200);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                for (int c = 0; c < 3; ++c)
+                    probe_px[(static_cast<size_t>(y) * w + x) * 3 + c] =
+                        static_cast<uint8_t>(y * 255 / (h - 1));
+        sv::ImageRGB probe{probe_px.data(), w, h, w * 3};
+        std::vector<float> emb2;
+        std::vector<int64_t> shape2;
+        Check(enc->encode(probe, &emb2, &shape2) == sv::Status::Ok,
+              std::string(label) + ": gradient probe encodes");
+        // Every embedding block must carry signal: a vertical gradient over a
+        // fully covered frame leaves no all-black block. With a padded frame the
+        // bottom third of the NHWC input would be zeros.
+        int zero_blocks = 0;
+        const int rows = static_cast<int>(shape2[2]);
+        for (int y = 0; y < rows; ++y) {
+            bool all_zero = true;
+            for (int x = 0; x < rows; ++x) {
+                if (emb2[static_cast<size_t>(y) * rows + x] > 0.f) { all_zero = false; break; }
+            }
+            if (all_zero) ++zero_blocks;
+        }
+        if (expect_normalised) {
+            // The padded convention pads: rows below the content are zero by
+            // design (192 of 256 here), and that is correct.
+            Check(zero_blocks > 0,
+                  std::string(label) + ": padded convention leaves the pad rows empty "
+                  "(got " + std::to_string(zero_blocks) + ")");
+        } else {
+            // The square-frame convention must not pad: every row carries signal.
+            Check(zero_blocks == 0,
+                  std::string(label) + ": square frame is fully covered, no empty rows (got " +
+                      std::to_string(zero_blocks) + ")");
+        }
+    }
+
+    Check(best_v > expected * 0.8 && best_v <= expected * 1.02,
+          std::string(label) + ": embedding scale matches the convention "
+          "(max=" + std::to_string(best_v) + ", expected ~" + std::to_string(expected) + ")");
+}
+
+// Runs the same tap-accuracy assertions against a graph pair, so the two
+// supported interfaces are held to an identical standard.
+static void CheckTapAccuracy(const std::string& enc_path, const std::string& dec_path,
+                             const char* label) {
+    sv::BackendOptions eo, dopts;
+    eo.model_path = enc_path;
+    dopts.model_path = dec_path;
+    sv::SegmentationSession session(sv::CreateOnnxEncoder(), sv::CreateOnnxDecoder());
+    const sv::Status ls = session.load(eo, dopts);
+    Check(ls == sv::Status::Ok, std::string(label) + ": loads");
+    if (ls != sv::Status::Ok) return;
+
+    const int w = 400, h = 300;
+    std::vector<uint8_t> px = MakeImage(w, h);
+    sv::ImageRGB img{px.data(), w, h, w * 3};
+    Check(session.prepare(img) == sv::Status::Ok, std::string(label) + ": prepare");
+
+    // The two preprocessing conventions must produce different geometry for a
+    // non-square image, and the tap transform must follow the session's own
+    // convention. Asserting the *difference* is what kills a mutant that swaps
+    // the square frame for a padded one.
+    {
+        const sv::sam::Geometry padded = sv::sam::PreprocessGeometry(w, h, 256);
+        float px_padded = 0.f, py_padded = 0.f, px_square = 0.f, py_square = 0.f;
+        sv::sam::TransformPoint(padded, 100.f, 80.f, &px_padded, &py_padded);
+        const sv::sam::Geometry square{256, 256, 256, 256.f / w, 256.f / h};
+        sv::sam::TransformPoint(square, 100.f, 80.f, &px_square, &py_square);
+        Check(std::fabs(py_padded - py_square) > 1.f,
+              std::string(label) + ": padded and square conventions differ in y "
+              "(" + std::to_string(py_padded) + " vs " + std::to_string(py_square) + ")");
+        Check(padded.new_h != square.new_h,
+              std::string(label) + ": padded and square conventions differ in height");
+    }
+
+    struct Probe { float x, y; } probes[] = {{100.f, 80.f}, {300.f, 220.f}};
+    for (const auto& p : probes) {
+        std::vector<uint8_t> mask;
+        const bool ok = TapAt(session, p.x, p.y, w, h, &mask);
+        Check(ok, std::string(label) + ": select returns an image-sized mask");
+        if (!ok) continue;
+        Check(mask.size() == static_cast<size_t>(w) * h,
+              std::string(label) + ": mask length is w*h");
+        const Blob b = Measure(mask, w);
+        const double dx = b.cx - p.x, dy = b.cy - p.y;
+        Check(std::fabs(dx) <= 14.0 && std::fabs(dy) <= 14.0,
+              std::string(label) + ": centroid within 14 px of the tap (" +
+                  std::to_string(dx) + "," + std::to_string(dy) + ")");
+        // The oracle also emits a tiny second disc near the top-left corner. With
+        // keep_largest (the session's behaviour) the result is one component.
+        Check(LargestComponent(mask, w, h) == b.area,
+              std::string(label) + ": keep_largest left a single component (" +
+                  std::to_string(LargestComponent(mask, w, h)) + " of " +
+                  std::to_string(b.area) + " px)");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr,
@@ -409,6 +581,17 @@ int main(int argc, char** argv) {
     enc->release();
     dec->release();
     Check(!enc->ready() && !dec->ready(), "release() clears readiness");
+
+    // --- 9. the second supported interface (Acly/MobileSAM export) -----------
+    // NHWC encoder input, point_coords/point_labels/mask_input/has_mask_input/
+    // orig_im_size decoder, masks returned at original resolution. Optional:
+    // pass the pair as argv[3], argv[4].
+    if (argc >= 5) {
+        CheckTapAccuracy(argv[3], argv[4], "acly-interface");
+        // Encoder-side absolute checks, one per convention.
+        CheckEncoderGeometry(argv[1], argv[2], /*normalised=*/true, "nchw-encoder");
+        CheckEncoderGeometry(argv[3], argv[4], /*normalised=*/false, "acly-encoder");
+    }
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

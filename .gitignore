@@ -47,4 +47,12 @@ tools/ci-shim/.cache/
 # --- signing keys (NEVER commit) ---
 keys/
 *.key
+keystore.properties
+
+# --- ONNX Runtime fetched for the Android build (binaries) ---
+third_party/onnxruntime-android/
+android/app/src/main/jniLibs/
+# APK/AAB artefacts: build outputs, not sources
+/app/build/
+android/app/build/
 __pycache__/

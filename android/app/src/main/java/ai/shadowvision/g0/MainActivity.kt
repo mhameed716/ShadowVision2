@@ -10,7 +10,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import ai.shadowvision.core.SvEngine
@@ -25,7 +25,7 @@ import ai.shadowvision.core.SvEngine
  *   (or drop a real photo + mask into /sdcard/Android/data/<pkg>/files/g0/)
  *   press "Run gate" and read the report.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
 
     private lateinit var log: TextView
     private var bitmap: Bitmap? = null

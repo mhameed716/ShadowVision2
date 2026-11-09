@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: MIT
+# Builds an installable APK on GitHub's runners, because this repository's dev
+# environment has no JDK, no Android SDK and no NDK.
+#
+# What it produces on every push:
+#   app-debug.apk    debug-signed, installs on any device, includes the G0 harness
+#   app-release.apk  ONLY when the four signing secrets are configured; otherwise
+#                    the job says so in the summary and uploads the debug APK only.
+#
+# Signing secrets (Settings -> Secrets and variables -> Actions):
+#   SV_KEYSTORE_BASE64   base64 of the .jks produced by tools/make_release_keystore.sh
+#   SV_KEYSTORE_PASSWORD
+#   SV_KEY_ALIAS
+#   SV_KEY_PASSWORD
+# Never commit a keystore; never paste one into an issue.
+name: android-apk
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and build tools
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;28.0.13004108" "platforms;android-35" \
+                               "build-tools;35.0.0" "cmake;3.22.1" >/dev/null
+          echo "NDK installed at $ANDROID_SDK_ROOT/ndk/28.0.13004108"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Fetch ONNX Runtime for Android
+        # Without this the app builds and runs, but with the built-in segmenter
+        # only. With it, real MobileSAM graphs load.
+        run: ./tools/fetch_onnxruntime_android.sh
+
+      # The JNI class name / signature mismatch that killed the app at
+      # System.loadLibrary is not caught by any compiler. Catch it here.
+      - name: Check JNI binding + CI workflow + manifest
+        run: |
+          python3 tools/check_jni_binding.py
+          python3 tools/check_ci_yaml.py
+          ./tools/check_manifest.sh
+
+      - name: Build debug APK
+        working-directory: android
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+          -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android"
+
+      - name: Decode signing key (only if configured)
+        id: key
+        env:
+          KS_B64: ${{ secrets.SV_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "have_key=true" >> "$GITHUB_OUTPUT"
+            echo "Release signing key present."
+          else
+            echo "have_key=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No SV_KEYSTORE_BASE64 secret: only a debug-signed APK will be produced."
+          fi
+
+      - name: Build release APK
+        if: steps.key.outputs.have_key == 'true'
+        working-directory: android
+        env:
+          SV_KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          SV_KEYSTORE_PASSWORD: ${{ secrets.SV_KEYSTORE_PASSWORD }}
+          SV_KEY_ALIAS: ${{ secrets.SV_KEY_ALIAS }}
+          SV_KEY_PASSWORD: ${{ secrets.SV_KEY_PASSWORD }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+          -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android"
+
+      - name: Verify the APK actually contains what it claims
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          for apk in android/app/build/outputs/apk/*/*.apk; do
+            [ -f "$apk" ] || continue
+            echo "=== $apk"
+            "$BT/aapt2" dump badging "$apk" | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|native-code)" || true
+            # No INTERNET permission: the promise is enforced, not documented.
+            if "$BT/aapt2" dump permissions "$apk" | grep -q "android.permission.INTERNET"; then
+              echo "FAIL: $apk requests INTERNET" >&2; exit 1
+            fi
+            # The native library must be there, and the ORT library with it.
+            unzip -l "$apk" | grep -q "lib/arm64-v8a/libshadowvision_jni.so" \
+              || { echo "FAIL: no JNI library in $apk" >&2; exit 1; }
+            unzip -l "$apk" | grep -q "lib/arm64-v8a/libonnxruntime.so" \
+              || { echo "FAIL: no ONNX Runtime in $apk" >&2; exit 1; }
+          done
+
+      - name: Sign check + fingerprint
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          for apk in android/app/build/outputs/apk/*/*.apk; do
+            [ -f "$apk" ] || continue
+            echo "=== $apk"
+            "$BT/apksigner" verify --print-certs "$apk" | head -6
+          done
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadowvision-apk
+          path: android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

@@ -15,7 +15,12 @@
 
 namespace {
 
-constexpr const char* kClass = "ai/shadowvision/g0/SvEngine";
+// MUST match the Kotlin object that declares the externals. It said
+// "ai/shadowvision/g0/SvEngine" while the class was moved to core/: the
+// library then failed to register natives and System.loadLibrary threw
+// UnsatisfiedLinkError before the first screen drew. Caught by
+// tools/check_jni_binding.py, which parses both sides.
+constexpr const char* kClass = "ai/shadowvision/core/SvEngine";
 
 void throw_illegal_state(JNIEnv* env, const char* msg) {
     if (!env) return;

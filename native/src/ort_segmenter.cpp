@@ -42,6 +42,16 @@ constexpr const char* kDecEmbedding = "embedding";
 constexpr const char* kDecPoints = "points";
 constexpr const char* kDecLabels = "labels";
 constexpr const char* kDecOut = "logits";
+// Acly/MobileSAM's sam_mask_decoder_single.onnx uses different names and adds
+// three inputs: the previous mask, a flag saying whether it is valid, and the
+// ORIGINAL image size, because that decoder also upsamples to full resolution.
+constexpr const char* kAclyEmbedding = "image_embeddings";
+constexpr const char* kAclyPoints = "point_coords";
+constexpr const char* kAclyLabels = "point_labels";
+constexpr const char* kAclyMaskIn = "mask_input";
+constexpr const char* kAclyHasMask = "has_mask_input";
+constexpr const char* kAclyOrigSize = "orig_im_size";
+constexpr const char* kAclyOut = "masks";
 
 // SAM's low-res mask is 256x256 for a 1024 input; derived, not assumed.
 constexpr int kMaskSide = 256;
@@ -104,22 +114,38 @@ public:
 
             m_session = Ort::Session(m_env, opts.model_path.c_str(), so);
 
+            // Two published layouts exist and both are legitimate:
+            //   NCHW [1,3,S,S]  (our tools/export_mobilesam_onnx.py)
+            //   NHWC [S,S,3]    (Acly/MobileSAM's mobile_sam_image_encoder.onnx,
+            //                    which normalises and pads to 1024 itself)
+            // Missing the second one means shipping a build that rejects the only
+            // MobileSAM ONNX most people can download. Detect, never assume.
             std::vector<int64_t> shape;
             if (!HasInput(m_session, kEncIn, &shape)) {
                 m_error = std::string("model has no input named '") + kEncIn + "'";
                 return Status::InvalidArgument;
             }
-            if (shape.size() != 4 || shape[2] <= 0 || shape[3] <= 0) {
+            if (shape.size() == 4 && shape[2] > 0 && shape[3] > 0) {
+                if (shape[2] != shape[3]) {
+                    m_error = "encoder input must be square, got " + ShapeToString(shape);
+                    return Status::InvalidArgument;
+                }
+                m_layout = EncoderLayout::NCHW;
+                m_model_size = static_cast<int>(shape[2]);
+            } else if (shape.size() == 3 && shape[0] > 0 && shape[1] > 0 && shape[2] == 3) {
+                if (shape[0] != shape[1]) {
+                    m_error = "encoder input must be square, got " + ShapeToString(shape);
+                    return Status::InvalidArgument;
+                }
+                m_layout = EncoderLayout::NHWC;
+                m_model_size = static_cast<int>(shape[0]);
+            } else {
                 // Dynamic shapes would need a second session per image size and make
-                // QNN impossible; the export script pins them on purpose.
-                m_error = "encoder input must be static NCHW, got " + ShapeToString(shape);
+                // QNN impossible; both exporters pin them on purpose.
+                m_error = "encoder input must be static NCHW [1,3,S,S] or NHWC [S,S,3], "
+                          "got " + ShapeToString(shape);
                 return Status::InvalidArgument;
             }
-            if (shape[2] != shape[3]) {
-                m_error = "encoder input must be square, got " + ShapeToString(shape);
-                return Status::InvalidArgument;
-            }
-            m_model_size = static_cast<int>(shape[2]);
             if (!HasOutput(m_session, kEncOut)) {
                 m_error = std::string("model has no output named '") + kEncOut + "'";
                 return Status::InvalidArgument;
@@ -141,7 +167,20 @@ public:
         if (!image.valid() || !embedding || !shape) return Status::InvalidArgument;
 
         const int s = m_model_size;
-        const auto geom = sam::PreprocessGeometry(image.width, image.height, s);
+        // Two preprocessing conventions, and they are NOT interchangeable:
+        //   NCHW (our export): aspect-preserving resize + zero pad to s x s, the
+        //     SamPredictor recipe. Points scale by new_w/img_w, new_h/img_h.
+        //   NHWC (Acly's export): the graph normalises and pads internally and
+        //     treats its frame as a SQUARE s x s spanning the whole image, so the
+        //     caller must resize to exactly s x s (aspect ratio stretched) and
+        //     scale points by s/img_w, s/img_h. Feeding it the padded layout
+        //     shifts every mask vertically by the pad — which is exactly what the
+        //     integration test caught before this comment existed.
+        const auto geom = m_layout == EncoderLayout::NHWC
+                              ? sam::Geometry{s, s, s,
+                                              static_cast<float>(s) / image.width,
+                                              static_cast<float>(s) / image.height}
+                              : sam::PreprocessGeometry(image.width, image.height, s);
         const size_t px = static_cast<size_t>(s) * s;
         const size_t bytes = px * 3 * sizeof(float);
 
@@ -159,6 +198,9 @@ public:
         ResizeAreaRGB(image, geom.new_w, geom.new_h,
                       MutableImageRGB{resized.data(), geom.new_w, geom.new_h, geom.new_w * 3});
 
+        // NHWC graphs normalise internally (and doing it twice would silently
+        // darken the input); NCHW graphs expect pre-normalised values.
+        const bool normalise = m_layout == EncoderLayout::NCHW;
         std::vector<float> input(px * 3, 0.f);
         for (int y = 0; y < geom.new_h; ++y) {
             const uint8_t* row = resized.data() + static_cast<size_t>(y) * geom.new_w * 3;
@@ -167,16 +209,36 @@ public:
                 const size_t i = static_cast<size_t>(y) * s + x;
                 for (int c = 0; c < 3; ++c) {
                     input[static_cast<size_t>(c) * px + i] =
-                        sam::Normalize(c, static_cast<float>(p[c]));
+                        normalise ? sam::Normalize(c, static_cast<float>(p[c]))
+                                  : static_cast<float>(p[c]);
                 }
             }
         }
 
         try {
             Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-            const int64_t in_shape[4] = {1, 3, s, s};
-            Ort::Value tin =
-                Ort::Value::CreateTensor<float>(mem, input.data(), input.size(), in_shape, 4);
+            Ort::Value tin{nullptr};
+            if (m_layout == EncoderLayout::NCHW) {
+                const int64_t in_shape[4] = {1, 3, s, s};
+                tin = Ort::Value::CreateTensor<float>(mem, input.data(), input.size(),
+                                                     in_shape, 4);
+            } else {
+                // NHWC: interleave the same floats. new_w/new_h == s here (square
+                // frame), so this is a plain CHW->HWC transpose of the full frame.
+                std::vector<float> nhwc(px * 3, 0.f);
+                for (int y = 0; y < geom.new_h; ++y) {
+                    for (int x = 0; x < geom.new_w; ++x) {
+                        const size_t src = static_cast<size_t>(y) * s + x;
+                        const size_t dst = (static_cast<size_t>(y) * geom.new_w + x) * 3;
+                        for (int c = 0; c < 3; ++c) {
+                            nhwc[dst + c] = input[static_cast<size_t>(c) * px + src];
+                        }
+                    }
+                }
+                const int64_t in_shape[3] = {s, s, 3};
+                tin = Ort::Value::CreateTensor<float>(mem, nhwc.data(), nhwc.size(),
+                                                     in_shape, 3);
+            }
             const char* in_names[] = {kEncIn};
             const char* out_names[] = {kEncOut};
             auto outputs = m_session.Run(Ort::RunOptions{nullptr}, in_names, &tin, 1, out_names, 1);
@@ -209,7 +271,9 @@ private:
     Ort::Env m_env;
     Ort::Session m_session{nullptr};
     mutable std::mutex m_mu;
+    enum class EncoderLayout { NCHW, NHWC };
     bool m_ready = false;
+    EncoderLayout m_layout = EncoderLayout::NCHW;
     int m_model_size = 1024;
     std::string m_error;
 };
@@ -236,9 +300,13 @@ public:
 
             m_session = Ort::Session(m_env, opts.model_path.c_str(), so);
 
+            // Acly's export names the embedding input 'image_embeddings'; ours is
+            // 'embedding'. Both are the same tensor.
             std::vector<int64_t> emb_shape;
-            if (!HasInput(m_session, kDecEmbedding, &emb_shape)) {
-                m_error = std::string("decoder has no input '") + kDecEmbedding + "'";
+            if (!HasInput(m_session, kDecEmbedding, &emb_shape) &&
+                !HasInput(m_session, kAclyEmbedding, &emb_shape)) {
+                m_error = std::string("decoder has no input '") + kDecEmbedding + "' or '" +
+                          kAclyEmbedding + "'";
                 return Status::InvalidArgument;
             }
             if (emb_shape.size() != 4 || emb_shape[1] <= 0 || emb_shape[2] <= 0 ||
@@ -254,20 +322,41 @@ public:
                 return Status::InvalidArgument;
             }
 
+            // Point input naming differs between exporters; accept both rather
+            // than force one. The semantic contract (N points in model pixels,
+            // labels 1/0/-1) is identical.
             std::vector<int64_t> pts_shape;
             if (!HasInput(m_session, kDecPoints, &pts_shape)) {
-                m_error = std::string("decoder has no input '") + kDecPoints + "'";
-                return Status::InvalidArgument;
+                if (HasInput(m_session, kAclyPoints, &pts_shape)) {
+                    m_acly_inputs = true;
+                } else {
+                    m_error = std::string("decoder has no input '") + kDecPoints +
+                              "' or '" + kAclyPoints + "'";
+                    return Status::InvalidArgument;
+                }
             }
             m_max_points = (pts_shape.size() == 3 && pts_shape[1] > 0)
                                ? static_cast<int>(pts_shape[1])
                                : 8;
-            if (!HasInput(m_session, kDecLabels, nullptr)) {
-                m_error = std::string("decoder has no input '") + kDecLabels + "'";
+            const char* labels_name = m_acly_inputs ? kAclyLabels : kDecLabels;
+            if (!HasInput(m_session, labels_name, nullptr)) {
+                m_error = std::string("decoder has no input '") + labels_name + "'";
                 return Status::InvalidArgument;
             }
-            if (!HasOutput(m_session, kDecOut)) {
-                m_error = std::string("decoder has no output '") + kDecOut + "'";
+            if (m_acly_inputs) {
+                // All three extras or none: a graph with a partial set is not a
+                // decoder we understand, and guessing would produce wrong masks.
+                if (!HasInput(m_session, kAclyMaskIn, nullptr) ||
+                    !HasInput(m_session, kAclyHasMask, nullptr) ||
+                    !HasInput(m_session, kAclyOrigSize, nullptr)) {
+                    m_error = "decoder has point_coords but is missing "
+                              "mask_input/has_mask_input/orig_im_size";
+                    return Status::InvalidArgument;
+                }
+            }
+            if (!HasOutput(m_session, m_acly_inputs ? kAclyOut : kDecOut)) {
+                m_error = std::string("decoder has no output '") +
+                          (m_acly_inputs ? kAclyOut : kDecOut) + "'";
                 return Status::InvalidArgument;
             }
             m_ready = true;
@@ -298,7 +387,14 @@ public:
         }
 
         // Prompt coordinates: image px -> padded model space.
-        const auto geom = sam::PreprocessGeometry(image_w, image_h, m_model_size());
+        // Must match the encoder's convention (see OnnxEncoder::encode). The two
+        // halves are separate graphs, so the convention is derived the same way:
+        // an "acly"-style decoder implies the square-frame encoder.
+        const auto geom = m_acly_inputs
+                              ? sam::Geometry{m_model_size(), m_model_size(), m_model_size(),
+                                              static_cast<float>(m_model_size()) / image_w,
+                                              static_cast<float>(m_model_size()) / image_h}
+                              : sam::PreprocessGeometry(image_w, image_h, m_model_size());
         const int n_points = std::max(1, m_max_points);
         const size_t pts = static_cast<size_t>(n_points);
         auto lease_pts = MemoryGovernor::global().acquire("seg.decoder.prompts",
@@ -309,6 +405,11 @@ public:
         std::vector<float> labels(pts, -1.f);  // SAM's convention: -1 = padding
         const int used = std::min<int>(static_cast<int>(prompts.size()), n_points);
         for (int i = 0; i < used; ++i) {
+            // The encoder resizes with an AREA filter (ResizeAreaRGB), so in
+            // practice the resized image is the long side at model_size with the
+            // short side at its proportional length — exactly what
+            // PreprocessGeometry computes. One transform for both exporters;
+            // an "acly" scale shortcut was tried and was wrong by scale_x.
             float mx = 0.f, my = 0.f;
             sam::TransformPoint(geom, prompts[i].x, prompts[i].y, &mx, &my);
             points[static_cast<size_t>(i) * 2 + 0] = mx;
@@ -330,11 +431,42 @@ public:
             Ort::Value t_lbl =
                 Ort::Value::CreateTensor<float>(mem, labels.data(), labels.size(), lbl_dims, 2);
 
-            const char* in_names[] = {kDecEmbedding, kDecPoints, kDecLabels};
-            Ort::Value inputs[] = {std::move(t_emb), std::move(t_pts), std::move(t_lbl)};
-            const char* out_names[] = {kDecOut};
-            auto outputs =
-                m_session.Run(Ort::RunOptions{nullptr}, in_names, inputs, 3, out_names, 1);
+            // Zeroed "no previous mask" feed: the studio always starts from a
+            // fresh set of taps, and re-feeding the last mask (iterative refine)
+            // is a separate feature, not something to fake here.
+            std::vector<float> no_mask(static_cast<size_t>(kMaskSide) * kMaskSide, 0.f);
+            std::vector<float> has_mask = {0.f};
+            std::vector<float> orig_size = {static_cast<float>(image_h),
+                                            static_cast<float>(image_w)};
+            const int64_t mask_dims[4] = {1, 1, kMaskSide, kMaskSide};
+            const int64_t flag_dims[1] = {1};
+            const int64_t size_dims[1] = {2};
+            Ort::Value t_mask =
+                Ort::Value::CreateTensor<float>(mem, no_mask.data(), no_mask.size(), mask_dims, 4);
+            Ort::Value t_has =
+                Ort::Value::CreateTensor<float>(mem, has_mask.data(), 1, flag_dims, 1);
+            Ort::Value t_size =
+                Ort::Value::CreateTensor<float>(mem, orig_size.data(), 2, size_dims, 1);
+
+            const char* in_names[6] = {m_acly_inputs ? kAclyEmbedding : kDecEmbedding,
+                                       m_acly_inputs ? kAclyPoints : kDecPoints,
+                                       m_acly_inputs ? kAclyLabels : kDecLabels,
+                                       kAclyMaskIn, kAclyHasMask};
+            const char* out_names[] = {m_acly_inputs ? kAclyOut : kDecOut};
+            std::vector<Ort::Value> inputs;
+            inputs.push_back(std::move(t_emb));
+            inputs.push_back(std::move(t_pts));
+            inputs.push_back(std::move(t_lbl));
+            size_t n_inputs = 3;
+            if (m_acly_inputs) {
+                inputs.push_back(std::move(t_mask));
+                inputs.push_back(std::move(t_has));
+                in_names[5] = kAclyOrigSize;
+                inputs.push_back(std::move(t_size));
+                n_inputs = 6;
+            }
+            auto outputs = m_session.Run(Ort::RunOptions{nullptr}, in_names, inputs.data(),
+                                         n_inputs, out_names, 1);
             if (outputs.empty()) return Status::Internal;
 
             auto info = outputs[0].GetTensorTypeAndShapeInfo();
@@ -385,6 +517,16 @@ public:
                 }
             }
 
+            if (m_acly_inputs && mw == image_w && mh == image_h) {
+                // This graph already resampled to the original image size, so
+                // running our own geometry on top would rescale a second time.
+                mask_out->resize(static_cast<size_t>(image_w) * image_h);
+                for (size_t i = 0; i < mask_out->size(); ++i) {
+                    (*mask_out)[i] = chosen[i] > 0.f ? 255 : 0;
+                }
+                if (keep_largest) KeepLargestComponent(mask_out->data(), image_w, image_h);
+                return Status::Ok;
+            }
             return Postprocess(chosen, mw, mh, geom, image_w, image_h, keep_largest, mask_out);
         } catch (const std::exception& e) {
             m_error = e.what();
@@ -453,6 +595,7 @@ private:
     int m_embed_channels = kEmbedChannels;
     int m_embed_side = kEmbedSide;
     int m_max_points = 8;
+    bool m_acly_inputs = false;
     int m_last_mask_side = kMaskSide;
     std::string m_error;
 };
