@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# G0 must stay green on a machine with no NDK, no JDK and no weights.
+name: g0
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  host-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+
+      - name: Verify (release)
+        run: ./tools/verify_g0.sh
+
+      - name: Verify (ASan + UBSan)
+        run: ./tools/verify_g0.sh --asan
+
+      - name: Upload gate report
+        uses: actions/upload-artifact@v4
+        with:
+          name: g0-report
+          path: |
+            native/build/report.json
+            native/build/out.ppm

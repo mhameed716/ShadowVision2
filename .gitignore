@@ -33,3 +33,13 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# --- ShadowVision2 G0 ---
+native/build*/
+native/build-ort/
+*.onnx
+*.gguf
+*.safetensors
+models/*.bin
+tools/ci-shim/.cache/
+.gradle/
