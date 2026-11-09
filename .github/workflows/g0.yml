@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: MIT
+# Must stay green on a machine with no NDK, no JDK and no weights.
+name: g0
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  host-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build python3 python3-pip python3-yaml python3-venv
+
+      # The ONNX translation units only compile with -DSV_WITH_ORT=ON, so on a
+      # plain host they are never compiled and can rot silently. Fetch the exact
+      # ONNX Runtime headers we target and let verify_g0.sh type-check them.
+      - name: Fetch ONNX Runtime headers (compile contract)
+        env:
+          ORT_REF: v1.23.2
+        run: |
+          set -euo pipefail
+          dest="$HOME/ortinc/onnxruntime/core/session"
+          mkdir -p "$dest"
+          for f in onnxruntime_c_api.h onnxruntime_cxx_api.h onnxruntime_cxx_inline.h \
+                   onnxruntime_float16.h onnxruntime_ep_c_api.h; do
+            for attempt in 1 2 3; do
+              if curl -fsSL --retry 2 -o "$dest/$f" \
+                "https://raw.githubusercontent.com/microsoft/onnxruntime/$ORT_REF/include/onnxruntime/core/session/$f"; then
+                break
+              fi
+              [ "$attempt" = 3 ] && { echo "failed to fetch $f" >&2; exit 1; }
+              sleep 5
+            done
+          done
+          echo "SV_ORT_INCLUDE=$dest" >> "$GITHUB_ENV"
+          echo "ORT_REF=$ORT_REF" >> "$GITHUB_ENV"
+
+      # The ONNX segmenter cannot be exercised by compiling it. Install the
+      # runtime, generate contract-shaped graphs and run the real code through
+      # real ONNX Runtime, then mutation-test those assertions.
+      # The runner's system python is externally managed and rejects pip; a
+      # setup-python interpreter is clean, predictable and puts python3 first on
+      # PATH so every later step uses it.
+      - uses: actions/setup-python@v5
+        if: always()
+        with:
+          python-version: "3.11"
+
+      - name: Install ONNX Runtime (python) + onnx
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          # Pin to the same version as the C++ headers above: the ABI must match.
+          python3 -m pip install "onnxruntime==1.23.2" "onnx>=1.16" numpy pyyaml
+
+      - name: "Verify (release: build, 76 tests, JNI + ONNX type-check, signed catalog, privacy, gate)"
+        run: ./tools/verify_g0.sh
+
+      - name: "Verify (ASan + UBSan)"
+        run: ./tools/verify_g0.sh --asan
+
+      - name: "Verify (ONNX segmenter: 58 integration checks + 9 mutants)"
+        run: ./tools/verify_g0.sh --with-ort --asan
+
+      - name: RFC 8032 Ed25519 test vector
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("sc", "tools/sign_catalog.py")
+          sc = importlib.util.module_from_spec(spec); spec.loader.exec_module(sc)
+          seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+          pub = sc._public(seed)
+          sig = sc._sign(seed, b"")
+          assert pub.hex() == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+          assert sig.hex().startswith("e5564300c360ac72")
+          assert sc._verify(pub, b"", sig) and not sc._verify(pub, b"x", sig)
+          print("RFC 8032 vectors OK")
+          PY
+
+      - name: Upload gate report
+        uses: actions/upload-artifact@v4
+        with:
+          name: g0-report
+          path: |
+            native/build/report.json
+            native/build/out.ppm
