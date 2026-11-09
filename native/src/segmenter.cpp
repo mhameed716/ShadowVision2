@@ -97,6 +97,11 @@ Status SegmentationSession::prepare(const ImageRGB& image) {
     if (st != Status::Ok) return st;
     m_image_w = image.width;
     m_image_h = image.height;
+    // The model side is whatever the encoder input declares, derived from the
+    // embedding it just produced (side x 16). Never assume 1024 twice.
+    m_model_size = m_shape.size() == 4 && m_shape[2] > 0
+                       ? static_cast<int>(m_shape[2]) * 16
+                       : 0;
     m_prepared = true;
     return Status::Ok;
 }
@@ -112,6 +117,12 @@ Status SegmentationSession::select(const std::vector<PointPrompt>& prompts,
                                     mask);
     m_decoder_ms = static_cast<float>(now_ms() - t0);
     if (st == Status::Ok) {
+        // A decoder that claims Ok must have filled exactly w*h pixels; a mask
+        // with the wrong length crashes the canvas, so reject it here where the
+        // message can say what happened.
+        if (mask->size() != static_cast<size_t>(m_image_w) * static_cast<size_t>(m_image_h)) {
+            return Status::Internal;
+        }
         *mask_w = m_image_w;
         *mask_h = m_image_h;
     }

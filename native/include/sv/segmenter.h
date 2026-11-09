@@ -79,6 +79,11 @@ public:
     float encoder_ms() const { return m_encoder_ms; }
     float decoder_ms() const { return m_decoder_ms; }
 
+    // The padded model side the graph actually declares (read from the encoder
+    // input at load time). Exposed for tests and for the dashboard: the UI must
+    // never assume 1024, and neither must a diagnostic.
+    int model_size() const { return m_model_size; }
+
 private:
     std::unique_ptr<ISegmenterEncoder> m_enc;
     std::unique_ptr<ISegmenterDecoder> m_dec;
@@ -86,6 +91,7 @@ private:
     std::vector<int64_t> m_shape;
     int m_image_w = 0;
     int m_image_h = 0;
+    int m_model_size = 0;
     bool m_prepared = false;
     float m_encoder_ms = 0.f;
     float m_decoder_ms = 0.f;

@@ -18,6 +18,8 @@ numbers on a real device justify it.
 
 ```bash
 ./tools/verify_g0.sh          # build + 76 unit checks + gate report
+./tools/verify_g0.sh --with-ort  # also run the ONNX segmenter for real (58 checks)
+./tools/verify_g0.sh --with-ort --asan   # and under ASan/UBSan
 ./tools/verify_g0.sh --asan   # under AddressSanitizer/UBSan
 ```
 
@@ -77,6 +79,8 @@ absent because ONNX Runtime has no Vulkan EP on Android and NNAPI is deprecated.
 | gate | state |
 |---|---|
 | G0 host harness (build, 76 tests, gate report, ASan/UBSan) | ✅ green |
+| ONNX segmenter runs real graphs through real ORT (58 checks) | ✅ `--with-ort` |
+| Those assertions are mutation-tested (9/9 mutants killed) | ✅ `--with-ort` |
 | ONNX translation units compile against ORT 1.23 headers | ✅ in CI |
 | MobileSAM weights exported + pushed to a device | ⬜ needs desktop export |
 | Signed catalog Ed25519 (Python sign ↔ C++ verify, tamper-tested) | ✅ green |

@@ -47,3 +47,4 @@ tools/ci-shim/.cache/
 # --- signing keys (NEVER commit) ---
 keys/
 *.key
+__pycache__/

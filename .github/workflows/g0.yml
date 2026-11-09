@@ -40,11 +40,23 @@ jobs:
           echo "SV_ORT_INCLUDE=$dest" >> "$GITHUB_ENV"
           echo "ORT_REF=$ORT_REF" >> "$GITHUB_ENV"
 
+      # The ONNX segmenter cannot be exercised by compiling it. Install the
+      # runtime, generate contract-shaped graphs and run the real code through
+      # real ONNX Runtime, then mutation-test those assertions.
+      - name: Install ONNX Runtime (python) + onnx
+        run: |
+          python3 -m pip install --upgrade pip
+          # Pin to the same version as the headers above: the C++ ABI must match.
+          python3 -m pip install "onnxruntime==1.23.2" "onnx>=1.16" numpy
+
       - name: "Verify (release: build, 76 tests, JNI + ONNX type-check, signed catalog, privacy, gate)"
         run: ./tools/verify_g0.sh
 
       - name: "Verify (ASan + UBSan)"
         run: ./tools/verify_g0.sh --asan
+
+      - name: "Verify (ONNX segmenter: 58 integration checks + 9 mutants)"
+        run: ./tools/verify_g0.sh --with-ort --asan
 
       - name: RFC 8032 Ed25519 test vector
         run: |

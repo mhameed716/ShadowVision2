@@ -6,18 +6,24 @@
 #   ./tools/verify_g0.sh            # build + tests + catalog + privacy + gate
 #   ./tools/verify_g0.sh --asan     # same, under AddressSanitizer/UBSan
 #   ./tools/verify_g0.sh --device   # additionally print the on-device steps
+#   ./tools/verify_g0.sh --with-ort # also run the real ONNX segmenter against
+#                                   # contract-shaped graphs (needs ORT headers +
+#                                   # libonnxruntime + python onnx); the only way
+#                                   # this path is exercised without a phone
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT}/native/build"
 SAN=OFF
 DEVICE=0
+WITH_ORT=0
 KEYS="${ROOT}/keys"
 
 for arg in "$@"; do
   case "$arg" in
     --asan)   BUILD_DIR="${ROOT}/native/build-asan"; SAN=ON ;;
     --device) DEVICE=1 ;;
+    --with-ort) WITH_ORT=1 ;;
     *) echo "unknown flag: $arg"; exit 2 ;;
   esac
 done
@@ -81,6 +87,18 @@ fi
 
 say "5/7 unit tests"
 "${BUILD_DIR}/sv_tests"
+
+if [ "${WITH_ORT}" = "1" ]; then
+  # --with-ort is a *stricter* gate, so a missing prerequisite is a failure,
+  # not a silent skip: coverage that quietly disappears is coverage you do not
+  # have.
+  python3 "${ROOT}/tools/ort_env.py" --check || {
+    echo "  --with-ort requires ONNX Runtime; see tools/ort_env.py --help"; exit 1; }
+  say "5b/7 ONNX segmenter integration (real graphs, real runtime)"
+  python3 "${ROOT}/tools/run_ort_integration.py"
+  say "5c/7 ONNX segmenter mutation test (do the assertions have teeth?)"
+  python3 "${ROOT}/tools/mutation_test_segmenter.py"
+fi
 
 say "6/7 signed catalog (Ed25519 end-to-end, exactly as the app verifies)"
 if [ ! -f "${KEYS}/dev.key" ]; then

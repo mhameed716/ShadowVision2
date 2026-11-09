@@ -86,6 +86,15 @@ target_link_libraries(sv_g0 PRIVATE sv_core)
 add_executable(sv_tests tests/sv_tests.cpp)
 target_link_libraries(sv_tests PRIVATE sv_core)
 
+# The ONNX segmenter only exists when SV_WITH_ORT=ON, so its integration test
+# (which runs real graphs through the real runtime) is built in the same
+# condition. Without ORT this target simply does not exist, and the gate says so
+# rather than printing a green line for a test that never ran.
+if(SV_WITH_ORT)
+  add_executable(sv_ort_integration tests/sv_ort_integration.cpp)
+  target_link_libraries(sv_ort_integration PRIVATE sv_core)
+endif()
+
 enable_testing()
 add_test(NAME unit COMMAND sv_tests)
 add_test(NAME gate_synthetic
