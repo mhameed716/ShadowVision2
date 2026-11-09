@@ -69,6 +69,16 @@ else
   echo "  SV_ORT_INCLUDE=/path/to/onnxruntime/include"
 fi
 
+say "4c/7 CI workflow is valid YAML"
+# A stray ": " inside an unquoted step name silently invalidates the whole
+# workflow file; GitHub then reports "failure" in 0s with no logs, which looks
+# exactly like a test failure. Catch it here instead.
+if python3 -c "import yaml" >/dev/null 2>&1; then
+  python3 "${ROOT}/tools/check_ci_yaml.py"
+else
+  echo "  skipped: PyYAML not installed"
+fi
+
 say "5/7 unit tests"
 "${BUILD_DIR}/sv_tests"
 

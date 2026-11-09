@@ -17,7 +17,7 @@ numbers on a real device justify it.
 ## Verify in 30 seconds (no NDK, no JDK, no weights)
 
 ```bash
-./tools/verify_g0.sh          # build + 33 unit checks + gate report
+./tools/verify_g0.sh          # build + 76 unit checks + gate report
 ./tools/verify_g0.sh --asan   # under AddressSanitizer/UBSan
 ```
 
@@ -76,7 +76,9 @@ absent because ONNX Runtime has no Vulkan EP on Android and NNAPI is deprecated.
 
 | gate | state |
 |---|---|
-| G0 host harness (build, tests, gate report, ASan) | ✅ green |
+| G0 host harness (build, 76 tests, gate report, ASan/UBSan) | ✅ green |
+| ONNX translation units compile against ORT 1.23 headers | ✅ in CI |
+| MobileSAM weights exported + pushed to a device | ⬜ needs desktop export |
 | Signed catalog Ed25519 (Python sign ↔ C++ verify, tamper-tested) | ✅ green |
 | Privacy guardrails (no INTERNET/GPS, no network APIs) | ✅ enforced in CI |
 | Product UI: Studio + Engine Control | ✅ built (needs device run) |
