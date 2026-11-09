@@ -43,18 +43,20 @@ jobs:
       # The ONNX segmenter cannot be exercised by compiling it. Install the
       # runtime, generate contract-shaped graphs and run the real code through
       # real ONNX Runtime, then mutation-test those assertions.
+      # The runner's system python is externally managed and rejects pip; a
+      # setup-python interpreter is clean, predictable and puts python3 first on
+      # PATH so every later step uses it.
+      - uses: actions/setup-python@v5
+        if: always()
+        with:
+          python-version: "3.11"
+
       - name: Install ONNX Runtime (python) + onnx
         run: |
           set -euo pipefail
-          # Ubuntu marks the system interpreter as externally managed; a venv is
-          # the supported way in and keeps the gate independent of distro pip
-          # policy. Everything that needs ORT runs inside it.
-          python3 -m venv "$HOME/venv"
-          . "$HOME/venv/bin/activate"
           python3 -m pip install --upgrade pip
-          # Pin to the same version as the headers above: the C++ ABI must match.
+          # Pin to the same version as the C++ headers above: the ABI must match.
           python3 -m pip install "onnxruntime==1.23.2" "onnx>=1.16" numpy pyyaml
-          echo "$HOME/venv/bin" >> "$GITHUB_PATH"
 
       - name: "Verify (release: build, 76 tests, JNI + ONNX type-check, signed catalog, privacy, gate)"
         run: ./tools/verify_g0.sh
