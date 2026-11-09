@@ -65,26 +65,39 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        # Tee the build output and, on failure, republish every compiler error as
-        # a workflow annotation. Annotations survive even when the raw job log is
-        # unavailable, and they point at the file and line instead of a wall of
-        # Gradle noise.
+        # Raw job logs and uploaded artifacts both live behind storage endpoints
+        # that are not reachable from every environment, so the failure has to be
+        # reported where it CAN be read: workflow annotations. On failure this
+        # republishes the compiler errors AND the tail of the log, which is enough
+        # to diagnose a remote build without seeing it.
         run: |
           set +e
           gradle :app:assembleDebug --no-daemon --stacktrace --console=plain \
-            -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android" 2>&1 | tee ../gradle-debug.log
-          rc=${PIPESTATUS[0]}
+            -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android" \
+            > ../gradle-debug.log 2>&1
+          rc=$?
+          strip_ansi() { sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
           if [ "$rc" -ne 0 ]; then
             echo "::error::gradle assembleDebug failed (exit $rc)"
-            # Kotlin: "e: file:///path/File.kt:12:34 message"
-            # C/C++:  "/path/file.cpp:12:34: error: message"
-            grep -aE "^(e: |.*: (error|Error): )" ../gradle-debug.log \
-              | sed -E 's/^e: file:\/\//' \
-              | head -40 \
+            # 1. every Kotlin / C / C++ diagnostic, file:line first
+            strip_ansi < ../gradle-debug.log \
+              | grep -aE "(^e: )|(: error: )|(error: )|(Unresolved reference)" \
+              | sed -E 's/^e: //' \
+              | head -30 \
               | while IFS= read -r line; do
-                  echo "::error::${line//$'\n'/ }"
+                  echo "::error::$(printf '%s' "$line" | tr -d '\r')"
                 done
-            grep -aE "What went wrong|^\* What went wrong" -A 6 ../gradle-debug.log | head -20 || true
+            # 2. the "what went wrong" block
+            strip_ansi < ../gradle-debug.log \
+              | grep -aE "What went wrong" -A 8 | head -20 \
+              | while IFS= read -r line; do
+                  echo "::error::$(printf '%s' "$line" | tr -d '\r')"
+                done
+            # 3. the tail, always — this is what actually tells you where it died
+            strip_ansi < ../gradle-debug.log | tail -40 \
+              | while IFS= read -r line; do
+                  echo "::error::TAIL $(printf '%s' "$line" | tr -d '\r' | cut -c1-400)"
+                done
             exit "$rc"
           fi
 
