@@ -121,6 +121,232 @@ if m_cmake and not m_cmake.group(1).startswith("3.22"):
     notes.append(f"externalNativeBuild declares CMake {m_cmake.group(1)}; the SDK "
                  "package installed in CI must match")
 
+# ------------------------------------------------------- Kotlin semantic checks
+# These are the bugs that a compiler *would* catch, written as checks because
+# there is no JDK on the development machine. Each one was a real defect found by
+# reading the code line by line.
+KOTLIN_FILES = []
+for base in KT_DIRS:
+    for dirpath, _, files in os.walk(base):
+        for f in files:
+            if f.endswith(".kt"):
+                KOTLIN_FILES.append(os.path.join(dirpath, f))
+
+def find(pattern: str, flags=0):
+    import re as _re
+    hits = []
+    for path in KOTLIN_FILES:
+        src = read(path)
+        for m in _re.finditer(pattern, src, flags):
+            line = src[:m.start()].count("\n") + 1
+            hits.append((os.path.relpath(path, ROOT), line, m.group(0)))
+    return hits
+
+# 1. ExifInterface: only androidx.exifinterface.media has rotationDegrees.
+if any(i.startswith("android.media.ExifInterface") for i in imports):
+    problems.append("android.media.ExifInterface has no rotationDegrees; use "
+                    "androidx.exifinterface.media.ExifInterface")
+if find(r"\.rotationDegrees") and not any(
+        i == "androidx.exifinterface.media.ExifInterface" for i in imports):
+    problems.append("rotationDegrees used without importing androidx.exifinterface")
+
+# 2. A member the UI assigns must exist on the class it assigns it on.
+surface = read(os.path.join(ROOT, "android/app/src/main/java/ai/shadowvision/core/MaskSurface.kt"))
+all_src = "\n".join(read(p) for p in KOTLIN_FILES)
+for prop in ("zoom", "erasing", "brushRadius"):
+    assigned = (f"surface?.{prop} =" in all_src or f"s.{prop} =" in all_src
+                or f".{prop} = " in all_src)
+    if not assigned:
+        continue
+    declared_anywhere = f"var {prop}" in surface or re.search(
+        rf"var\s+{prop}\b", all_src)
+    if not re.search(rf"var\s+{prop}\b", surface):
+        problems.append(f"the UI assigns `{prop}` on MaskSurface but the class declares "
+                        f"no such property (it has " +
+                        ", ".join(re.findall(r"var\s+(\w+)", surface)) + ")")
+
+# 3. Calls into MaskSurface must match its declared functions.
+declared = set(re.findall(r"fun ([a-zA-Z]\w*)\(", surface))
+for path in KOTLIN_FILES:
+    src = read(path)
+    if "ai.shadowvision.core.MaskSurface" not in src and "MaskSurface" not in src:
+        continue
+    for m in re.finditer(r"surface\??\.([a-zA-Z]\w*)\(", src):
+        name = m.group(1)
+        if name not in declared and name not in ("also", "apply", "let", "run"):
+            problems.append(f"{os.path.relpath(path, ROOT)} calls MaskSurface.{name}() "
+                            "which does not exist")
+
+# 4. Signatures: for the project's own cross-file API, a call site must supply
+#    between the number of required parameters and the total (Kotlin default
+#    arguments are legal, so the upper bound is the hard rule).
+#
+#    Implemented with a real paren scanner, not a regex: a regex over
+#    `name(...)` matches across newlines and reports nonsense (a first attempt
+#    produced 30 false positives, including `recycle()` "called with 18 args").
+def split_top_level(text: str) -> list[str]:
+    """Split on commas that are not nested inside (), [], {} or a string."""
+    parts, depth, cur, in_str, str_ch = [], 0, "", False, ""
+    for ch in text:
+        if in_str:
+            cur += ch
+            if ch == str_ch:
+                in_str = False
+            continue
+        if ch in "\"'":
+            in_str, str_ch = True, ch
+            cur += ch
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        parts.append(cur)
+    return parts
+
+
+import re as _re
+
+def _trailing_lambda_start(src: str, close_idx: int) -> bool:
+    """True if the '{' matching close_idx sits directly after the call's ')'."""
+    depth = 0
+    i = close_idx
+    while i >= 0:
+        if src[i] == "}":
+            depth += 1
+        elif src[i] == "{":
+            depth -= 1
+            if depth == 0:
+                j = i - 1
+                while j >= 0 and src[j] in " \t\r\n":
+                    j -= 1
+                return j >= 0 and src[j] == ")"
+        i -= 1
+    return False
+
+
+def scan_args(src: str, open_idx: int):
+    """Return (arg_count, end_index) for the call whose '(' is at open_idx."""
+    depth = 0
+    args = 0
+    in_str = False
+    str_ch = ""
+    i = open_idx
+    started = False
+    while i < len(src):
+        ch = src[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == str_ch:
+                in_str = False
+            i += 1
+            continue
+        if ch in "\"'":
+            in_str, str_ch = True, ch
+            i += 1
+            started = True
+            continue
+        if ch in "([{":
+            depth += 1
+            if depth == 1:
+                started = False
+            i += 1
+            continue
+        if ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                n = args + (1 if started else 0)
+                # f(a) { x -> ... }: the trailing lambda is one more argument.
+                j = i + 1
+                while j < len(src) and src[j] in " \t\r\n":
+                    j += 1
+                if j < len(src) and src[j] == "{":
+                    n += 1
+                return (n, i)
+            i += 1
+            continue
+        if ch == "," and depth == 1:
+            args += 1
+            started = False
+            i += 1
+            continue
+        # `f(a) { x -> ... }` : the trailing lambda is an argument, not part of the
+        # next call. Without this the scanner saw `{ _ -> }` as one argument and
+        # then a stray `->`, reporting a 1-argument call to a 2-argument function.
+        if ch == "}" and depth == 1 and _trailing_lambda_start(src, i):
+            args += 1
+            started = False
+        if not ch.isspace():
+            started = True
+        i += 1
+    return (None, None)
+
+
+# Only the project's own API is checked; matching framework methods would just
+# rediscover the Android SDK from scratch and be wrong about overloads.
+PROJECT_API = {
+    "smartSelect", "remove", "export", "onMaskChanged", "onUndoState", "onTap",
+    "setTool", "setBrushRadius", "loadInpainter", "loadSegmenter", "inpaint",
+    "prepareSegmentation", "tapToMask", "catalogVerify", "pathFor", "verifyFile",
+    "offerSelection", "exportMask", "setImage", "clearMask", "canUndo", "canRedo",
+    "consumeMessage", "revertToOriginal", "setCompare", "importImage", "setZoom",
+}
+
+declarations: dict[str, tuple[int, int, str]] = {}
+for path in KOTLIN_FILES:
+    src = read(path)
+    for m in _re.finditer(r"fun\s+(\w+)\s*\(", src):
+        name = m.group(1)
+        open_idx = m.end() - 1
+        _, end_i = scan_args(src, open_idx)
+        if end_i is None:
+            continue
+        params = src[open_idx + 1:end_i]
+        plist = [p.strip() for p in split_top_level(params) if p.strip()]
+        total = len(plist)
+        required = len([p for p in plist if "=" not in p])
+        declarations.setdefault(name, (required, total, os.path.basename(path)))
+
+for path in KOTLIN_FILES:
+    src = read(path)
+    for m in _re.finditer(r"\.(\w+)\s*\(", src):
+        name = m.group(1)
+        if name not in PROJECT_API or name not in declarations:
+            continue
+        required, total, _ = declarations[name]
+        open_idx = m.end() - 1
+        n, _end = scan_args(src, open_idx)
+        if n is None:
+            continue
+        if n < required or n > total:
+            line = src[:m.start()].count("\n") + 1
+            problems.append(
+                f"{os.path.relpath(path, ROOT)}:{line} calls {name}() with {n} args "
+                f"but it accepts {required}..{total}")
+
+# 5. Bitmap copies assigned to state must be recycled somewhere, or a full-size
+#    bitmap leaks per operation.
+vm = read(os.path.join(ROOT, "android/app/src/main/java/ai/shadowvision/studio/StudioViewModel.kt"))
+if "originalForCompare = bitmap.copy" in vm and ".recycle()" not in vm:
+    problems.append("StudioViewModel stores bitmap copies but never recycles them")
+
+# 6. Unit mixing: a JNI helper that already returns MB must not be divided again.
+engine = read(os.path.join(ROOT, "android/app/src/main/java/ai/shadowvision/core/SvEngine.kt"))
+if re.search(r"nativeRssMb\(\)\s*/\s*1024", engine):
+    problems.append("nativeRssMb already returns MB; dividing by 1024 again makes the "
+                    "console RSS gauge read 0")
+jni_src = read(os.path.join(ROOT, "android/app/src/main/cpp/jni_bridge.cpp"))
+if "kb / 1024.0" not in jni_src and "kb > 0 ? static_cast<jdouble>(kb) / 1024.0" not in jni_src:
+    problems.append("could not confirm nativeRssMb returns MB (JNI conversion missing)")
+
 # ---------------------------------------------------------------- JNI class
 jni = read(os.path.join(ROOT, "android/app/src/main/cpp/jni_bridge.cpp"))
 m_class = re.search(r'kClass\s*=\s*"([^"]+)"', jni)

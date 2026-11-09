@@ -50,9 +50,14 @@ class MaskSurface(context: Context) : View(context) {
             invalidate()
         }
 
-    var brushRadiusPx: Float = 24f      // in image pixels
+    /**
+     * Brush radius in IMAGE pixels. The name the UI uses is [brushRadius]; it was
+     * only ever called brushRadiusPx here while every caller wrote
+     * `surface.brushRadius = ...`, which does not compile. One name, one setter.
+     */
+    var brushRadius: Float = 24f
         set(value) {
-            field = value.coerceIn(4f, 400f)
+            field = value.coerceIn(2f, 400f)
             invalidate()
         }
 
@@ -285,7 +290,7 @@ class MaskSurface(context: Context) : View(context) {
         // Brush cursor: shows the real radius in image pixels at current zoom.
         if (lastX > 0 && lastY > 0) {
             val scale = drawMatrix.mapRadius(1f)
-            canvas.drawCircle(lastX, lastY, brushRadiusPx * scale, brushPaint)
+            canvas.drawCircle(lastX, lastY, brushRadius * scale, brushPaint)
         }
     }
 
@@ -302,13 +307,24 @@ class MaskSurface(context: Context) : View(context) {
                 dragging = false
                 lastX = event.x
                 lastY = event.y
-                pushUndo()
-                strokeAt(event.x, event.y, event.x, event.y)
+                // Nothing is painted here. A tap is a segmentation PROMPT, and the
+                // old code stamped a brush dot on ACTION_DOWN unconditionally —
+                // so "Smart select" both painted a red blob and asked the native
+                // decoder for a mask. The stroke is started on the first MOVE that
+                // exceeds the drag threshold; undo is pushed at that moment, so a
+                // tap never leaves an empty undo step behind either.
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (hypot(event.x - downX, event.y - downY) > 12f) dragging = true
-                strokeAt(lastX, lastY, event.x, event.y)
+                if (!dragging && hypot(event.x - downX, event.y - downY) > 12f) {
+                    dragging = true
+                    pushUndo()
+                    // Start the stroke where the finger went down, not where it is
+                    // now, or the first 12 px of every stroke are missing.
+                    strokeAt(downX, downY, event.x, event.y)
+                } else if (dragging) {
+                    strokeAt(lastX, lastY, event.x, event.y)
+                }
                 lastX = event.x
                 lastY = event.y
                 return true
@@ -320,8 +336,9 @@ class MaskSurface(context: Context) : View(context) {
                     // A tap (not a stroke): hand it to segmentation instead.
                     val (ix, iy) = toImage(event.x, event.y)
                     listener?.onTap(ix, iy)
+                } else if (dragging) {
+                    maskStrokeCount++
                 }
-                maskStrokeCount++
                 notifyMask()
                 invalidate()
                 return true
@@ -339,7 +356,7 @@ class MaskSurface(context: Context) : View(context) {
             color = Color.rgb(255, 92, 92)
             alpha = 255
         }
-        paint.strokeWidth = max(1f, brushRadiusPx * 2f * scale)
+        paint.strokeWidth = max(1f, brushRadius * 2f * scale)
         paint.strokeCap = Paint.Cap.ROUND
         paint.isAntiAlias = true
         val p0 = floatArrayOf(x0, y0)
@@ -353,12 +370,16 @@ class MaskSurface(context: Context) : View(context) {
         p1[0] /= maskScale
         p1[1] /= maskScale
         canvas.drawLine(p0[0], p0[1], p1[0], p1[1], paint)
-        // Repaint only the dirty rect of the image, not the whole surface.
+        // Invalidate the dirty rectangle in VIEW coordinates. The previous code
+        // replaced the stroke endpoints with the mask-space values and then used
+        // them as view coordinates, so at any zoom other than 1 (and with the
+        // /2 mask downscale) it repainted the wrong part of the screen.
+        val pad = brushRadius * drawMatrix.mapRadius(1f) + 2f
         val rect = Rect(
-            (min(p0[0], p1[0]) - paint.strokeWidth).toInt().coerceAtLeast(0),
-            (min(p0[1], p1[1]) - paint.strokeWidth).toInt().coerceAtLeast(0),
-            (max(p0[0], p1[0]) + paint.strokeWidth).toInt().coerceAtMost(width),
-            (max(p0[1], p1[1]) + paint.strokeWidth).toInt().coerceAtMost(height),
+            (min(x0, x1) - pad).toInt().coerceAtLeast(0),
+            (min(y0, y1) - pad).toInt().coerceAtLeast(0),
+            (max(x0, x1) + pad).toInt().coerceAtMost(width),
+            (max(y0, y1) + pad).toInt().coerceAtMost(height),
         )
         invalidate(rect)
     }

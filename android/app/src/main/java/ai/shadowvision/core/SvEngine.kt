@@ -80,8 +80,13 @@ object SvEngine {
     }
     fun logDump(): String = nativeLogDump()
 
-    /** Current process RSS in MB, for the console gauge. Cheap enough to poll 1/s. */
-    fun rssMb(): Double = nativeRssMb() / 1024.0
+    /**
+     * Current process RSS in MB, for the console gauge. Cheap enough to poll 1/s.
+     *
+     * nativeRssMb() already converts KB to MB in jni_bridge.cpp; dividing again
+     * made a 300 MB process report 0.3 MB and the console gauge permanently flat.
+     */
+    fun rssMb(): Double = nativeRssMb()
 
     // ---- models --------------------------------------------------------
 

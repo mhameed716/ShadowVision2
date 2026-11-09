@@ -52,14 +52,25 @@ jint JNICALL n_inpaint(JNIEnv* env, jclass, jbyteArray rgba, jint w, jint h, jby
     }
     jsize rgba_len = env->GetArrayLength(rgba);
     jsize mask_len = env->GetArrayLength(mask);
-    if (rgba_len < w * h * 4 || mask_len < mw * mh) {
+    // Width and height are externals from Kotlin; the multiplication must be done
+    // in 64-bit. `w * h * 4` overflows int32 above ~46340 px per side, and the
+    // check then passes for a buffer that is far too small - a heap overflow
+    // guarded by a comparison that silently wrapped.
+    if (w <= 0 || h <= 0 || mw <= 0 || mh <= 0) {
+        throw_illegal_state(env, "empty bitmap or mask");
+        return SV_ERR_INVALID_ARGUMENT;
+    }
+    const int64_t need_rgba = static_cast<int64_t>(w) * h * 4;
+    const int64_t need_mask = static_cast<int64_t>(mw) * mh;
+    if (static_cast<int64_t>(rgba_len) < need_rgba ||
+        static_cast<int64_t>(mask_len) < need_mask) {
         throw_illegal_state(env, "buffer sizes do not match the bitmap");
         return SV_ERR_INVALID_ARGUMENT;
     }
 
     auto* rgba_ptr = static_cast<uint8_t*>(env->GetPrimitiveArrayCritical(rgba, nullptr));
     if (!rgba_ptr) return SV_ERR_OUT_OF_MEMORY;
-    std::vector<uint8_t> mask_copy(static_cast<size_t>(mw) * mh);
+    std::vector<uint8_t> mask_copy(static_cast<size_t>(mw) * static_cast<size_t>(mh));
     env->GetByteArrayRegion(mask, 0, static_cast<jsize>(mask_copy.size()),
                             reinterpret_cast<jbyte*>(mask_copy.data()));
 

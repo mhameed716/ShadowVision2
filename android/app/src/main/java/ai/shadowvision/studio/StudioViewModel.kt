@@ -5,9 +5,9 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.media.ExifInterface
 import android.net.Uri
 import android.os.PowerManager
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import ai.shadowvision.core.ModelCatalog
@@ -216,7 +216,20 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Smart select: one tap -> native decoder -> mask. 30-80 ms on the worker. */
-    fun smartSelect(x: Int, y: Int, currentMask: ByteArray?, w: Int, h: Int) {
+    fun smartSelect(x: Int, y: Int) {
+        // The tap arrives in image pixels of `state.image`, which is exactly the
+        // bitmap that prepareSegmentation() embedded, so no rescaling is needed
+        // here. Passing a hard-coded 0 from the caller (as the old signature
+        // invited) would have produced an empty mask buffer.
+        val w = _state.value.image?.width ?: 0
+        val h = _state.value.image?.height ?: 0
+        if (w <= 0 || h <= 0) return
+        if (!_state.value.segmentationReady) {
+            _state.value = _state.value.copy(
+                message = "Smart select needs the analysis step — import the photo again",
+            )
+            return
+        }
         viewModelScope.launch {
             val t0 = System.currentTimeMillis()
             val rc = SvEngine.tapToMask(listOf(SvEngine.Tap(x, y, true)), w, h)
@@ -255,6 +268,14 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 return@launch
             }
+            // The snapshot for "Before/After" is taken AND RELEASED only after the
+            // native pipeline has consumed the working bitmap. The old code
+            // assigned a fresh copy into `originalForCompare` on every removal and
+            // never recycled the previous one: two removals on a 12 MP photo is
+            // ~100 MB of orphaned bitmaps, which is an OOM on a 4 GB phone.
+            _state.value.originalForCompare?.let { old ->
+                if (old !== bitmap && !old.isRecycled) old.recycle()
+            }
             _state.value = _state.value.copy(
                 busy = true,
                 stage = "removing",
@@ -282,11 +303,18 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun revertToOriginal() {
-        val original = _state.value.originalForCompare ?: return
-        _state.value = _state.value.copy(
-            image = original.copy(Bitmap.Config.ARGB_8888, false),
+        val current = _state.value
+        val original = current.originalForCompare ?: return
+        val fresh = original.copy(Bitmap.Config.ARGB_8888, false)
+        // The edited bitmap is dead once we revert; without this, every revert
+        // leaked a full-resolution copy.
+        current.image?.let { if (it !== fresh && !it.isRecycled) it.recycle() }
+        _state.value = current.copy(
+            image = fresh,
             resultAvailable = false,
             hasMask = false,
+            maskCoverage = 0f,
+            selectionVersion = current.selectionVersion + 1,
         )
     }
 

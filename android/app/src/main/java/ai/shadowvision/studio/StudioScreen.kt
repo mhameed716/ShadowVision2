@@ -161,8 +161,13 @@ fun StudioScreen(vm: StudioViewModel, onOpenConsole: () -> Unit) {
                                 }
 
                                 override fun onTap(x: Int, y: Int) {
+                                    // The tap is in image pixels of this bitmap, and
+                                    // the ViewModel embeds exactly this bitmap, so
+                                    // it needs nothing else. The old call passed
+                                    // four arguments (including a null mask) to a
+                                    // function that took five — it did not compile.
                                     if (vm.state.value.tool == StudioViewModel.Tool.SMART_SELECT) {
-                                        vm.smartSelect(x, y, null, image.width, image.height)
+                                        vm.smartSelect(x, y)
                                     }
                                 }
                             }
@@ -328,7 +333,14 @@ fun StudioScreen(vm: StudioViewModel, onOpenConsole: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     OutlinedAction("Export PNG", Modifier.weight(1f)) {
-                        state.image?.let { bmp -> vm.export(bmp) { } }
+                        state.image?.let { bmp ->
+                            // export() reports through the state message, which the
+                            // studio already renders; the callback is a hook for
+                            // future sharing and must not be omitted (it is a
+                            // required parameter, so the old `vm.export(bmp) {}`
+                            // with one argument did not compile).
+                            vm.export(bmp) { _ -> }
+                        }
                     }
                     OutlinedAction("Before / After", Modifier.weight(1f)) {
                         vm.setCompare(!state.showBefore)

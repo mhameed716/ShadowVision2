@@ -90,6 +90,10 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Keep the mapping file with the artefact: with zero telemetry, a
+            // stack trace a user reports is the only diagnostic channel, and it is
+            // worthless without the obfuscation map.
+            ndk { debugSymbolLevel = "FULL" }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             manifestPlaceholders["g0Enabled"] = "false"
             // A release build MUST be signed with a real key. Falling back to the
