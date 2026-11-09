@@ -27,7 +27,19 @@ DEFAULT_INCLUDE_GUESSES = (
 )
 
 
+def _forced_missing() -> bool:
+    """Test hook: pretend ORT is absent so the failure path can be verified.
+
+    A gate whose "missing prerequisite" branch is never executed is a gate you
+    are trusting, not testing. verify_g0.sh sets this and requires a non-zero
+    exit.
+    """
+    return os.environ.get("SV_ORT_FORCE_MISSING") == "1"
+
+
 def find_include() -> str | None:
+    if _forced_missing():
+        return None
     env = os.environ.get("SV_ORT_INCLUDE")
     if env and os.path.isfile(os.path.join(env, "onnxruntime_cxx_api.h")):
         return env
@@ -45,6 +57,8 @@ def find_lib() -> tuple[str, str] | None:
     `libonnxruntime.so.1`, so both symlinks are created in one temp dir, which is
     then used for -L *and* for RPATH.
     """
+    if _forced_missing():
+        return None
     env_lib = os.environ.get("SV_ORT_LIB")
     env_rt = os.environ.get("SV_ORT_RUNTIME", env_lib)
     if env_lib and os.path.isdir(env_lib):
@@ -69,6 +83,8 @@ def find_lib() -> tuple[str, str] | None:
 
 
 def have_python_onnx() -> bool:
+    if _forced_missing():
+        return False
     try:
         import onnx  # noqa: F401
         return True

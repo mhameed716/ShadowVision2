@@ -94,6 +94,15 @@ if [ "${WITH_ORT}" = "1" ]; then
   # have.
   python3 "${ROOT}/tools/ort_env.py" --check || {
     echo "  --with-ort requires ONNX Runtime; see tools/ort_env.py --help"; exit 1; }
+  # The prerequisite check must actually fail closed. Verified, not assumed.
+  if SV_ORT_FORCE_MISSING=1 python3 "${ROOT}/tools/ort_env.py" --check >/dev/null 2>&1; then
+    echo "  FAIL: ort_env.py --check passed with ORT forced missing"; exit 1
+  fi
+  if SV_ORT_FORCE_MISSING=1 python3 "${ROOT}/tools/run_ort_integration.py" --allow-skip >/dev/null 2>&1; then
+    echo "  --with-ort: --allow-skip path reported success (expected here, informational)"
+  fi
+  echo "  prerequisite check fails closed when ORT is absent: OK"
+
   say "5b/7 ONNX segmenter integration (real graphs, real runtime)"
   python3 "${ROOT}/tools/run_ort_integration.py"
   say "5c/7 ONNX segmenter mutation test (do the assertions have teeth?)"
