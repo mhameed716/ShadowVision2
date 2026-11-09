@@ -169,7 +169,23 @@ Status LaMaInpainter::inpaint(const ImageRGB& image, const Mask& mask, MutableIm
 
     // Dilate + feather at network resolution: cheaper and equivalent.
     DilateMask(m_impl->crop_mask.data(), net_w, net_h, net_w, 3);
+    // The network needs a FEATHERED mask so its own boundary is soft; the blend
+    // needs the DILATED mask so nothing of the object survives at the edge. Two
+    // masks, both derived from the same dilation, kept in separate buffers.
+    std::vector<uint8_t> dilated_mask(static_cast<size_t>(net_w) * net_h);
+    std::memcpy(dilated_mask.data(), m_impl->crop_mask.data(), dilated_mask.size());
     FeatherMask(m_impl->crop_mask.data(), net_w, net_h, net_w, 2);
+
+    // Crop-resolution version of the dilated mask for blending.
+    std::vector<uint8_t> blend_mask(static_cast<size_t>(crop_w) * crop_h, 0);
+    for (int y = 0; y < crop_h; ++y) {
+        const int sy = std::min(net_h - 1, y * net_h / crop_h);
+        for (int x = 0; x < crop_w; ++x) {
+            const int sx = std::min(net_w - 1, x * net_w / crop_w);
+            blend_mask[static_cast<size_t>(y) * crop_w + x] =
+                dilated_mask[static_cast<size_t>(sy) * net_w + sx];
+        }
+    }
 
     stats.add("lama.crop_prepare", now_ms() - t_crop_start);
     if (cancel.cancelled()) return Status::Cancelled;
@@ -200,8 +216,13 @@ Status LaMaInpainter::inpaint(const ImageRGB& image, const Mask& mask, MutableIm
     }
     MutableImageRGB out_crop{out.data + static_cast<size_t>(by0) * out.stride + static_cast<size_t>(bx0) * 3,
                              crop_w, crop_h, out.stride};
+    // Blend with the DILATED mask, not the raw stroke. The dilation exists because
+    // a mask that stops exactly on the object edge always leaves a one-pixel halo
+    // of it behind; but blending with the undilated mask re-introduces exactly
+    // that halo — the red rims left around the post in the end-to-end run. The
+    // dilation and the blend must use the same mask or the dilation is decoration.
     BlendMaskedRGB(out_crop, sv::ImageRGB{patch_view.data, crop_w, crop_h, crop_w * 3},
-                   Mask{src_mask.data, crop_w, crop_h, mask.stride}, nullptr, 0);
+                   Mask{blend_mask.data(), crop_w, crop_h, crop_w}, nullptr, 0);
     stats.add("lama.blend", now_ms() - t_blend);
     stats.peak_rss_kb = MemoryGovernor::process_peak_rss_kb();
     return Status::Ok;

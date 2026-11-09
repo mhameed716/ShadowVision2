@@ -177,6 +177,12 @@ say "7/7 privacy guardrails + gate report"
                      --backend synthetic --repeat 1 --emulate-ns 120 --json \
                      > "${BUILD_DIR}/report.json"
 
+# The demo scene from docs/demo, through the real pipeline, measured pixel by
+# pixel. This is the check whose absence let "eight ring passes" ship: the object
+# stayed on screen and every assertion still passed. It must leave no object
+# colour behind and must match the surrounding sky.
+"${ROOT}/tools/check_demo_output.py" "${BUILD_DIR}/sv_g0"
+
 if [ "${DEVICE}" = "1" ]; then
   say "device"
   command -v adb >/dev/null || { echo "adb missing"; exit 1; }

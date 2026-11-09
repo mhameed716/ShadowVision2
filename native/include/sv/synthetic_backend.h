@@ -52,4 +52,12 @@ private:
 void TeleaFill(uint8_t* rgb, int rgb_stride, uint8_t* mask, int mask_stride, int w, int h,
                int iterations);
 
+// Multi-scale fill: solve the hole on a coarse pyramid level where it is only a
+// few pixels across, then refine downwards. Unlike N ring-fill passes, this fills
+// holes of ANY size; eight passes only advance eight pixels, which left the
+// middle of a wide object untouched while still reporting success.
+// Returns the number of pixels filled. `rgb`/`mask` are updated in place and the
+// mask is cleared where it was filled.
+int PyramidFill(uint8_t* rgb, int rgb_stride, uint8_t* mask, int mask_stride, int w, int h);
+
 }  // namespace sv

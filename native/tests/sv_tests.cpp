@@ -138,19 +138,41 @@ void test_pipeline_does_not_touch_outside_mask() {
     CHECK(inpaint.inpaint(img.view(), mask.view(), out.mutable_view(), cancel, stats, 128) ==
           sv::Status::Ok);
 
+    // The blend uses the DILATED mask on purpose: a mask that stops exactly on
+    // the object edge always leaves a 1-px halo of the object behind. So the
+    // contract is not "zero pixels outside the stroke" — it is "nothing beyond
+    // the documented halo". Both halves matter: `touched_outside > 0` proves the
+    // halo is really applied (drop the dilation and the red rims come back),
+    // and `too_far == 0` proves it does not creep into the rest of the photo.
     size_t touched_outside = 0;
+    size_t too_far = 0;
+    const int halo_px = 6;
     for (int y = 0; y < img.height; ++y) {
         for (int x = 0; x < img.width; ++x) {
             if (mask.data[static_cast<size_t>(y) * img.width + x] != 0) continue;
             const size_t i = (static_cast<size_t>(y) * img.width + x) * 3;
+            bool changed = false;
             for (int c = 0; c < 3; ++c) {
-                if (out.data[i + c] != img.data[i + c]) ++touched_outside;
+                if (out.data[i + c] != img.data[i + c]) changed = true;
             }
+            if (!changed) continue;
+            ++touched_outside;
+            // Distance to the nearest mask pixel (Chebyshev, brute force is fine
+            // at this size).
+            int best = 1 << 30;
+            for (int yy = std::max(0, y - halo_px); yy <= std::min(img.height - 1, y + halo_px); ++yy) {
+                for (int xx = std::max(0, x - halo_px); xx <= std::min(img.width - 1, x + halo_px); ++xx) {
+                    if (mask.data[static_cast<size_t>(yy) * img.width + xx] == 0) continue;
+                    best = std::min(best, std::max(std::abs(yy - y), std::abs(xx - x)));
+                }
+            }
+            if (best > halo_px) ++too_far;
         }
     }
-    // The blend only writes inside the crop, and only where mask>0, so this is
-    // an exact contract — allow zero.
-    CHECK(touched_outside == 0);
+    printf("  halo: %zu px changed outside the stroke (limit %d px from it)\n",
+           touched_outside, halo_px);
+    CHECK(touched_outside > 0);   // the dilation must actually be in the blend
+    CHECK(too_far == 0);          // and it must stay local
     CHECK(stats.stage_count >= 3);
 }
 
@@ -328,6 +350,140 @@ void test_sam_geometry_portrait_square_and_rounding() {
     CHECK(std::abs(sv::sam::InverseMapY(big, my) - 1512.f) < 1.f);
 }
 
+// The end-to-end demo found this the hard way: eight ring-fill passes advance
+// eight pixels, so a 46-px-wide object kept its original pixels in the middle and
+// the backend still returned Ok. These checks fail if that ever comes back.
+void test_pyramid_fill_clears_wide_holes() {
+    printf("[test] PyramidFill: wide hole fully replaced, gradient preserved\n");
+    const int w = 200, h = 120;
+    std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3);
+    std::vector<uint8_t> m(static_cast<size_t>(w) * h, 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const size_t p = (static_cast<size_t>(y) * w + x) * 3;
+            rgb[p + 0] = 30;
+            rgb[p + 1] = static_cast<uint8_t>(90 + y / 3);  // vertical gradient
+            rgb[p + 2] = 200;
+        }
+    }
+    // 30 wide x 60 tall — far wider than the 8 px a ring fill reaches.
+    for (int y = 30; y < 90; ++y) {
+        for (int x = 80; x < 110; ++x) {
+            m[static_cast<size_t>(y) * w + x] = 255;
+            const size_t p = (static_cast<size_t>(y) * w + x) * 3;
+            rgb[p + 0] = 200; rgb[p + 1] = 40; rgb[p + 2] = 40;
+        }
+    }
+    const int filled = sv::PyramidFill(rgb.data(), w * 3, m.data(), w, w, h);
+    CHECK(filled == 30 * 60);
+    int left = 0;
+    for (uint8_t v : m) left += (v != 0);
+    CHECK(left == 0);  // no hole pixel may survive
+
+    // The centre must no longer be the object's colour at all.
+    const size_t c = (static_cast<size_t>(60) * w + 95) * 3;
+    CHECK(rgb[c + 0] < 60);          // was 200
+    CHECK(rgb[c + 2] > 150);         // was 40
+    // ...and it must follow the gradient, not be a flat block: the pixel 20 rows
+    // down is brighter than the one 20 rows up by roughly 20/3.
+    const size_t up = (static_cast<size_t>(40) * w + 95) * 3;
+    const size_t dn = (static_cast<size_t>(80) * w + 95) * 3;
+    const int delta = static_cast<int>(rgb[dn + 1]) - static_cast<int>(rgb[up + 1]);
+    CHECK(delta >= 10 && delta <= 18);
+    // Smooth: no staircase steps inside the hole (neighbouring rows differ by <= 1).
+    int max_step = 0;
+    for (int y = 32; y < 88; ++y) {
+        const int a = rgb[(static_cast<size_t>(y) * w + 95) * 3 + 1];
+        const int b = rgb[(static_cast<size_t>(y + 1) * w + 95) * 3 + 1];
+        max_step = std::max(max_step, std::abs(a - b));
+    }
+    CHECK(max_step <= 1);
+}
+
+void test_pyramid_fill_no_hole_is_a_noop() {
+    printf("[test] PyramidFill: empty mask changes nothing\n");
+    const int w = 32, h = 32;
+    std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3, 77);
+    std::vector<uint8_t> m(static_cast<size_t>(w) * h, 0);
+    CHECK(sv::PyramidFill(rgb.data(), w * 3, m.data(), w, w, h) == 0);
+    bool untouched = true;
+    for (auto v : rgb) untouched = untouched && v == 77;
+    CHECK(untouched);
+}
+
+// The check that was missing when the demo bug shipped: go through the REAL
+// pipeline (LaMaInpainter + SyntheticBackend), not the fill function directly. A
+// mutated backend that quietly keeps the object's pixels (eight ring passes, no
+// error reported) must fail here.
+void test_backend_removes_wide_object_end_to_end() {
+    printf("[test] end-to-end: a wide object is gone from the output pixels\n");
+    const int w = 320, h = 240;
+    sv::OwnedImage img;
+    img.width = w;
+    img.height = h;
+    img.data.resize(static_cast<size_t>(w) * h * 3);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const size_t p = (static_cast<size_t>(y) * w + x) * 3;
+            img.data[p + 0] = 40;                      // sky blue, left to right
+            img.data[p + 1] = static_cast<uint8_t>(120 + x / 8);
+            img.data[p + 2] = 210;
+        }
+    }
+    // A 50-px-wide red post, like the one in the demo scene.
+    for (int y = 60; y < 200; ++y) {
+        for (int x = 120; x < 170; ++x) {
+            const size_t p = (static_cast<size_t>(y) * w + x) * 3;
+            img.data[p + 0] = 190; img.data[p + 1] = 60; img.data[p + 2] = 55;
+        }
+    }
+    sv::OwnedMask mask;
+    mask.width = w;
+    mask.height = h;
+    mask.data.assign(static_cast<size_t>(w) * h, 0);
+    for (int y = 60; y < 200; ++y)
+        for (int x = 120; x < 170; ++x) mask.data[static_cast<size_t>(y) * w + x] = 255;
+
+    sv::SyntheticBackend::Config cfg;
+    auto backend = std::unique_ptr<sv::IInpaintBackend>(new sv::SyntheticBackend(cfg));
+    sv::LaMaInpainter inpaint(std::move(backend));
+    CHECK(inpaint.load({}) == sv::Status::Ok);
+
+    sv::OwnedImage out;
+    out.width = w;
+    out.height = h;
+    out.data.assign(img.data.size(), 0);
+    sv::Stats stats;
+    sv::CancelToken cancel;
+    CHECK(inpaint.inpaint(img.view(), mask.view(), out.mutable_view(), cancel, stats, 256) ==
+          sv::Status::Ok);
+
+    // Count pixels that are still the post's red anywhere in the mask.
+    int still_red = 0;
+    int mask_px = 0;
+    for (int y = 62; y < 198; ++y) {
+        for (int x = 122; x < 168; ++x) {
+            const size_t p = (static_cast<size_t>(y) * w + x) * 3;
+            ++mask_px;
+            if (out.data[p + 0] > 150 && out.data[p + 2] < 110) ++still_red;
+        }
+    }
+    printf("  object pixels left in the output: %d of %d\n", still_red, mask_px);
+    CHECK(mask_px > 0);
+    // A few edge pixels are tolerable; a surviving block is not. Eight ring
+    // passes left ~60%% of this region red.
+    CHECK(still_red * 100 < mask_px * 2);
+
+    // And the result must match the surrounding sky's gradient, not be a flat block.
+    // Same column, above the post: the sky is constant down a column, so this is
+    // the value the hole should have taken.
+    const size_t a = (static_cast<size_t>(130) * w + 145) * 3;
+    const size_t b = (static_cast<size_t>(20) * w + 145) * 3;   // known sky, same column
+    const int da = static_cast<int>(out.data[a + 1]) - static_cast<int>(img.data[b + 1]);
+    printf("  green channel vs known sky above it: %+d\n", da);
+    CHECK(da > -12 && da < 12);
+}
+
 void test_area_resize() {
     printf("[test] area resize: constant stays constant, edges do not bleed to zero\n");
     sv::OwnedImage flat;
@@ -392,6 +548,9 @@ int main() {
     test_sam_geometry_landscape();
     test_sam_geometry_portrait_square_and_rounding();
     test_area_resize();
+    test_backend_removes_wide_object_end_to_end();
+    test_pyramid_fill_clears_wide_holes();
+    test_pyramid_fill_no_hole_is_a_noop();
     test_sam_normalization();
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

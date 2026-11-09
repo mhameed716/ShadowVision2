@@ -33,6 +33,7 @@ add_library(sv_core STATIC
   src/image_io.cpp
   src/inpaint_lama.cpp
   src/synthetic_backend.cpp
+  src/pyramid_fill.cpp
   src/sha256.cpp
   src/manifest.cpp
   src/segmenter.cpp

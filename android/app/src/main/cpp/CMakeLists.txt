@@ -16,6 +16,7 @@ add_library(sv_core STATIC
   ${SV_NATIVE_ROOT}/src/image_io.cpp
   ${SV_NATIVE_ROOT}/src/inpaint_lama.cpp
   ${SV_NATIVE_ROOT}/src/synthetic_backend.cpp
+  ${SV_NATIVE_ROOT}/src/pyramid_fill.cpp
   ${SV_NATIVE_ROOT}/src/sha256.cpp
   ${SV_NATIVE_ROOT}/src/manifest.cpp
   ${SV_NATIVE_ROOT}/src/segmenter.cpp
