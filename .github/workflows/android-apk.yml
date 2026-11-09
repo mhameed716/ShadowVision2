@@ -65,8 +65,28 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
-          -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android"
+        # Tee the build output and, on failure, republish every compiler error as
+        # a workflow annotation. Annotations survive even when the raw job log is
+        # unavailable, and they point at the file and line instead of a wall of
+        # Gradle noise.
+        run: |
+          set +e
+          gradle :app:assembleDebug --no-daemon --stacktrace --console=plain \
+            -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android" 2>&1 | tee ../gradle-debug.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::gradle assembleDebug failed (exit $rc)"
+            # Kotlin: "e: file:///path/File.kt:12:34 message"
+            # C/C++:  "/path/file.cpp:12:34: error: message"
+            grep -aE "^(e: |.*: (error|Error): )" ../gradle-debug.log \
+              | sed -E 's/^e: file:\/\//' \
+              | head -40 \
+              | while IFS= read -r line; do
+                  echo "::error::${line//$'\n'/ }"
+                done
+            grep -aE "What went wrong|^\* What went wrong" -A 6 ../gradle-debug.log | head -20 || true
+            exit "$rc"
+          fi
 
       - name: Decode signing key (only if configured)
         id: key
@@ -90,8 +110,16 @@ jobs:
           SV_KEYSTORE_PASSWORD: ${{ secrets.SV_KEYSTORE_PASSWORD }}
           SV_KEY_ALIAS: ${{ secrets.SV_KEY_ALIAS }}
           SV_KEY_PASSWORD: ${{ secrets.SV_KEY_PASSWORD }}
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
-          -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android"
+        run: |
+          set +e
+          gradle :app:assembleRelease --no-daemon --stacktrace --console=plain \
+            -Psv.ortRoot="$GITHUB_WORKSPACE/third_party/onnxruntime-android" 2>&1 | tee ../gradle-release.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -aE "^(e: |.*: (error|Error): )" ../gradle-release.log | head -40 \
+              | while IFS= read -r line; do echo "::error::${line}"; done
+            exit "$rc"
+          fi
 
       - name: Verify the APK actually contains what it claims
         run: |
@@ -121,6 +149,16 @@ jobs:
             echo "=== $apk"
             "$BT/apksigner" verify --print-certs "$apk" | head -6
           done
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-logs
+          path: |
+            gradle-debug.log
+            gradle-release.log
+          if-no-files-found: ignore
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
