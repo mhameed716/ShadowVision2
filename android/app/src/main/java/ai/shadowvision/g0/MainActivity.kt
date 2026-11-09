@@ -13,7 +13,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
-import java.io.File
+import ai.shadowvision.core.SvEngine
 
 /**
  * G0 harness UI. Deliberately ugly: it exists to produce numbers, and every
@@ -80,7 +80,10 @@ class MainActivity : AppCompatActivity() {
                 val thermalAfter = pm.currentThermalStatus
                 append("")
                 append("=== G0 ===")
-                append(report.summary)
+                append(
+                    (if (report.ok) "OK" else "ERR(${report.status})") +
+                        " in %.1f ms".format(report.totalMs)
+                )
                 append("wall clock   : $wall ms (includes JNI + bitmap copy)")
                 append("tracked peak : %.1f MB / budget %.0f MB"
                     .format(report.trackedPeakMb, report.budgetMb))
@@ -88,6 +91,7 @@ class MainActivity : AppCompatActivity() {
                 append("thermal      : $thermalBefore -> $thermalAfter")
                 append("work res     : 512")
                 report.stages.forEach { append("  - %-18s %8.1f ms".format(it.name, it.ms)) }
+                append("npu partition: %.0f%%".format(report.npuRatio * 100))
                 append("gate: ${if (report.ok && report.peakRssMb < 700) "PASS" else "FAIL"}")
             }
         }

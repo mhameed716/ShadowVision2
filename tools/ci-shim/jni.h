@@ -34,6 +34,7 @@ typedef _jobject* jlongArray;
 
 #define JNI_VERSION_1_6 0x00010006
 #define JNI_OK 0
+#define JNI_ABORT 2
 #define JNI_ERR (-1)
 #define JNIEXPORT
 #define JNICALL
@@ -61,6 +62,10 @@ public:
     void* GetPrimitiveArrayCritical(jarray, jboolean*) { return buffer_; }
     void ReleasePrimitiveArrayCritical(jarray, void*, jint) {}
     void GetByteArrayRegion(jarray, jsize, jsize, jbyte* dst) { (void)dst; }
+    void GetIntArrayRegion(jarray, jsize, jsize, jint* dst) {
+        for (jsize i = 0; i < 2; ++i) dst[i] = 0;
+    }
+    void SetIntArrayRegion(jintArray, jsize, jsize, const jint*) {}
     void SetLongArrayRegion(jlongArray, jsize, jsize, const jlong*) {}
     jstring NewStringUTF(const char*) { return sv_ci_shim::object(); }
     jint RegisterNatives(jclass, const JNINativeMethod*, jint) { return JNI_OK; }

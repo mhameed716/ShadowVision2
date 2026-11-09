@@ -83,6 +83,102 @@ jint JNICALL n_inpaint(JNIEnv* env, jclass, jbyteArray rgba, jint w, jint h, jby
 
 void JNICALL n_release(JNIEnv*, jclass) { sv_release(); }
 
+jdouble JNICALL n_rss_mb(JNIEnv*, jclass) {
+    const int64_t kb = sv_rss_kb();
+    return kb > 0 ? static_cast<jdouble>(kb) / 1024.0 : -1.0;
+}
+
+/* ---- segmentation -------------------------------------------------------- */
+
+jint JNICALL n_seg_load(JNIEnv* env, jclass, jstring enc, jstring dec) {
+    auto to_str = [&](jstring s, std::string* out) {
+        if (!s) return;
+        const char* c = env->GetStringUTFChars(s, nullptr);
+        if (c) {
+            *out = c;
+            env->ReleaseStringUTFChars(s, c);
+        }
+    };
+    std::string e, d;
+    to_str(enc, &e);
+    to_str(dec, &d);
+    return sv_load_segmenter(e.empty() ? nullptr : e.c_str(), d.empty() ? nullptr : d.c_str());
+}
+
+jint JNICALL n_seg_prepare(JNIEnv* env, jclass, jbyteArray rgba, jint w, jint h) {
+    if (!rgba) return SV_ERR_INVALID_ARGUMENT;
+    auto* ptr = static_cast<uint8_t*>(env->GetPrimitiveArrayCritical(rgba, nullptr));
+    const jint rc = sv_seg_prepare(ptr, w, h);
+    env->ReleasePrimitiveArrayCritical(rgba, ptr, JNI_ABORT);
+    return rc;
+}
+
+jint JNICALL n_seg_tap(JNIEnv* env, jclass, jintArray xs, jintArray ys, jbyteArray labels,
+                       jint count, jbyteArray out_mask, jintArray dims) {
+    if (!xs || !ys || !labels || !out_mask || !dims) return SV_ERR_INVALID_ARGUMENT;
+    jint px[16];
+    jint py[16];
+    jbyte pl[16];
+    const jint n = count > 16 ? 16 : count;  // more than 16 taps is a UI bug, not a use case
+    env->GetIntArrayRegion(xs, 0, n, px);
+    env->GetIntArrayRegion(ys, 0, n, py);
+    env->GetByteArrayRegion(labels, 0, n, pl);
+    auto* mask = static_cast<uint8_t*>(env->GetPrimitiveArrayCritical(out_mask, nullptr));
+    jint w = 0, h = 0;
+    const jint rc = sv_seg_tap(px, py, reinterpret_cast<const int8_t*>(pl), n, mask, &w, &h);
+    env->ReleasePrimitiveArrayCritical(out_mask, mask, 0);
+    const jint d[2] = {w, h};
+    env->SetIntArrayRegion(dims, 0, 2, d);
+    return rc;
+}
+
+void JNICALL n_seg_release(JNIEnv*, jclass) { sv_seg_release(); }
+
+jstring JNICALL n_catalog_load(JNIEnv* env, jclass, jstring manifest, jstring pubkey) {
+    std::string m, k;
+    if (manifest) {
+        const char* c = env->GetStringUTFChars(manifest, nullptr);
+        if (c) {
+            m = c;
+            env->ReleaseStringUTFChars(manifest, c);
+        }
+    }
+    if (pubkey) {
+        const char* c = env->GetStringUTFChars(pubkey, nullptr);
+        if (c) {
+            k = c;
+            env->ReleaseStringUTFChars(pubkey, c);
+        }
+    }
+    const jint rc = sv_catalog_load(m.empty() ? nullptr : m.c_str(),
+                                    k.empty() ? nullptr : k.c_str());
+    return env->NewStringUTF(rc == SV_OK ? sv_catalog_json() : sv_catalog_error());
+}
+
+jstring JNICALL n_catalog_error(JNIEnv* env, jclass) {
+    return env->NewStringUTF(sv_catalog_error());
+}
+
+jint JNICALL n_catalog_verify(JNIEnv* env, jclass, jstring dir, jstring id) {
+    std::string d, i;
+    if (dir) {
+        const char* c = env->GetStringUTFChars(dir, nullptr);
+        if (c) {
+            d = c;
+            env->ReleaseStringUTFChars(dir, c);
+        }
+    }
+    if (id) {
+        const char* c = env->GetStringUTFChars(id, nullptr);
+        if (c) {
+            i = c;
+            env->ReleaseStringUTFChars(id, c);
+        }
+    }
+    char detail[256] = {0};
+    return sv_catalog_verify_file(d.c_str(), i.c_str(), detail, sizeof(detail));
+}
+
 jstring JNICALL n_version(JNIEnv* env, jclass) { return env->NewStringUTF(sv_version()); }
 
 jstring JNICALL n_log_dump(JNIEnv* env, jclass) {
@@ -103,6 +199,23 @@ const JNINativeMethod kMethods[] = {
      reinterpret_cast<void*>(n_version)},
     {const_cast<char*>("nativeLogDump"), const_cast<char*>("()Ljava/lang/String;"),
      reinterpret_cast<void*>(n_log_dump)},
+    {const_cast<char*>("nativeRssMb"), const_cast<char*>("()D"),
+     reinterpret_cast<void*>(n_rss_mb)},
+    {const_cast<char*>("nativeSegLoad"), const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)I"),
+     reinterpret_cast<void*>(n_seg_load)},
+    {const_cast<char*>("nativeSegPrepare"), const_cast<char*>("([BII)I"),
+     reinterpret_cast<void*>(n_seg_prepare)},
+    {const_cast<char*>("nativeSegTap"), const_cast<char*>("([I[I[BI[B[I)I"),
+     reinterpret_cast<void*>(n_seg_tap)},
+    {const_cast<char*>("nativeSegRelease"), const_cast<char*>("()V"),
+     reinterpret_cast<void*>(n_seg_release)},
+    {const_cast<char*>("nativeCatalogLoad"),
+     const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+     reinterpret_cast<void*>(n_catalog_load)},
+    {const_cast<char*>("nativeCatalogError"), const_cast<char*>("()Ljava/lang/String;"),
+     reinterpret_cast<void*>(n_catalog_error)},
+    {const_cast<char*>("nativeCatalogVerify"), const_cast<char*>("(Ljava/lang/String;Ljava/lang/String;)I"),
+     reinterpret_cast<void*>(n_catalog_verify)},
 };
 
 }  // namespace

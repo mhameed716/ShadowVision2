@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define SV_ABI_VERSION 1
+#define SV_ABI_VERSION 2
 
 typedef enum SvStatus {
     SV_OK = 0,
@@ -57,6 +57,9 @@ int32_t sv_init(int64_t budget_kb);
 void sv_shutdown(void);
 const char* sv_version(void);
 
+/* Current process RSS in KB (VmRSS), or -1. Cheap; the console polls it ~1/s. */
+int64_t sv_rss_kb(void);
+
 /* Load an inpainting model. `model_path` may be empty to select the synthetic
  * backend (used by the harness to validate plumbing on-device). */
 int32_t sv_load_model(const char* model_path, int32_t use_npu, int32_t threads);
@@ -71,6 +74,45 @@ int32_t sv_inpaint_rgba(uint8_t* rgba, int32_t width, int32_t height,
 
 /* Releases weights and scratch buffers. Called when leaving the editor. */
 void sv_release(void);
+
+/* ---------------- Segmentation (MobileSAM, split encoder/decoder) ----------- */
+
+/* Loads encoder + decoder from signed-catalog paths. Empty paths select the
+ * built-in synthetic segmenter (no model installed), which keeps the studio
+ * usable and testable on a fresh install. */
+int32_t sv_load_segmenter(const char* encoder_path, const char* decoder_path);
+
+/* Encodes the image once (0.4-1.2 s). Call after every image change. */
+int32_t sv_seg_prepare(const uint8_t* rgba, int32_t width, int32_t height);
+
+/* Answers a tap/box prompt. Writes a full-resolution 8-bit mask (0/255) into
+ * `out_mask` (must hold width*height bytes) and returns the mask dimensions via
+ * out_w/out_h. Prompts accumulate: label 1 = keep, 0 = exclude. */
+int32_t sv_seg_tap(const int32_t* xs, const int32_t* ys, const int8_t* labels, int32_t count,
+                   uint8_t* out_mask, int32_t* out_w, int32_t* out_h);
+
+/* Encoder/decoder timings of the last operations, in ms. */
+void sv_seg_timings(float* encoder_ms, float* decoder_ms);
+
+void sv_seg_release(void);
+
+/* ------------------------------- Catalog ---------------------------------- */
+
+/* Verifies the Ed25519 signature of a catalog file against `pubkey_hex`
+ * (64 hex chars = 32 bytes) and caches the parsed entries.
+ * Returns SV_OK, or an error with the reason available via sv_catalog_error(). */
+int32_t sv_catalog_load(const char* manifest_path, const char* pubkey_hex);
+const char* sv_catalog_error(void);
+
+/* The verified catalog as JSON: [{id,file,bytes,license,commercial,input_w,
+ * input_h,params,steps,cfg,seed}]. Empty array when nothing is verified. */
+const char* sv_catalog_json(void);
+
+/* Size + SHA-256 check of one catalog file inside models_dir.
+ * Returns SV_OK, SV_ERR_MODEL_NOT_LOADED (missing) or SV_ERR_INVALID_ARGUMENT
+ * (mismatch); `detail` receives a human-readable reason. */
+int32_t sv_catalog_verify_file(const char* models_dir, const char* model_id, char* detail,
+                               int32_t detail_len);
 
 /* Log ring buffer (the "live logs" panel reads this, never logcat parsing). */
 int32_t sv_log_dump(char* buf, int32_t buf_len);

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# G0 must stay green on a machine with no NDK, no JDK and no weights.
+# Must stay green on a machine with no NDK, no JDK and no weights.
 name: g0
 
 on:
@@ -14,13 +14,28 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build python3
 
-      - name: Verify (release)
+      - name: Verify (release: build, 52 tests, JNI type-check, signed catalog, privacy, gate)
         run: ./tools/verify_g0.sh
 
       - name: Verify (ASan + UBSan)
         run: ./tools/verify_g0.sh --asan
+
+      - name: RFC 8032 Ed25519 test vector
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("sc", "tools/sign_catalog.py")
+          sc = importlib.util.module_from_spec(spec); spec.loader.exec_module(sc)
+          seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+          pub = sc._public(seed)
+          sig = sc._sign(seed, b"")
+          assert pub.hex() == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+          assert sig.hex().startswith("e5564300c360ac72")
+          assert sc._verify(pub, b"", sig) and not sc._verify(pub, b"x", sig)
+          print("RFC 8032 vectors OK")
+          PY
 
       - name: Upload gate report
         uses: actions/upload-artifact@v4

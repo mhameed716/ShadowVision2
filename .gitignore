@@ -43,3 +43,7 @@ native/build-ort/
 models/*.bin
 tools/ci-shim/.cache/
 .gradle/
+
+# --- signing keys (NEVER commit) ---
+keys/
+*.key

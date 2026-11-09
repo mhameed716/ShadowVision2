@@ -10,7 +10,7 @@
 # so that CI and any laptop can run the whole harness before a single weight
 # has been downloaded.
 cmake_minimum_required(VERSION 3.18)
-project(shadowvision_g0 CXX)
+project(shadowvision_g0 C CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -33,7 +33,27 @@ add_library(sv_core STATIC
   src/image_io.cpp
   src/inpaint_lama.cpp
   src/synthetic_backend.cpp
+  src/sha256.cpp
+  src/manifest.cpp
+  src/segmenter.cpp
 )
+
+# Ed25519 (Orson Peters, zlib licence) — vendored, see third_party/ed25519/LICENSE
+add_library(sv_ed25519 STATIC
+  third_party/ed25519/add_scalar.c
+  third_party/ed25519/fe.c
+  third_party/ed25519/ge.c
+  third_party/ed25519/key_exchange.c
+  third_party/ed25519/keypair.c
+  third_party/ed25519/sc.c
+  third_party/ed25519/seed.c
+  third_party/ed25519/sha512.c
+  third_party/ed25519/sign.c
+  third_party/ed25519/verify.c
+)
+target_include_directories(sv_ed25519 PUBLIC third_party/ed25519)
+target_compile_options(sv_ed25519 PRIVATE -w)
+target_link_libraries(sv_core PUBLIC sv_ed25519)
 target_include_directories(sv_core PUBLIC include)
 target_compile_options(sv_core PRIVATE ${SV_WARNINGS})
 
